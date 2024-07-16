@@ -50,6 +50,7 @@ except ImportError:
 
     warnings.warn("xFormers is not available (Block)")
 
+
 class TeacherStudent(nn.Module):
     def __init__(self, teacher_backbone, student_backbone, teacher_head, student_head):
         super().__init__()
@@ -57,6 +58,7 @@ class TeacherStudent(nn.Module):
         self.student = nn.ModuleDict(dict(backbone=student_backbone, head=student_head))
         for p in self.teacher.parameters():
             p.requires_grad = False
+
 
 class DINOHead(nn.Module):
     def __init__(
@@ -71,9 +73,18 @@ class DINOHead(nn.Module):
     ):
         super().__init__()
         nlayers = max(nlayers, 1)
-        self.mlp = _build_mlp(nlayers, in_dim, bottleneck_dim, hidden_dim=hidden_dim, use_bn=use_bn, bias=mlp_bias)
+        self.mlp = _build_mlp(
+            nlayers,
+            in_dim,
+            bottleneck_dim,
+            hidden_dim=hidden_dim,
+            use_bn=use_bn,
+            bias=mlp_bias,
+        )
         self.apply(self._init_weights)
-        self.last_layer = nn.utils.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
+        self.last_layer = nn.utils.weight_norm(
+            nn.Linear(bottleneck_dim, out_dim, bias=False)
+        )
         self.last_layer.weight_g.data.fill_(1)
 
     def _init_weights(self, m):
@@ -90,7 +101,9 @@ class DINOHead(nn.Module):
         return x
 
 
-def _build_mlp(nlayers, in_dim, bottleneck_dim, hidden_dim=None, use_bn=False, bias=True):
+def _build_mlp(
+    nlayers, in_dim, bottleneck_dim, hidden_dim=None, use_bn=False, bias=True
+):
     if nlayers == 1:
         return nn.Linear(in_dim, bottleneck_dim, bias=bias)
     else:
@@ -881,7 +894,13 @@ class VisionTransformer(nn.Module):
             M = masks[
                 0
             ].sum()  # number of elements to be kept, considered constant for each element of the batch
-            x = torch.cat((x[:, :1], x[:, 1:].reshape(B * L, D)[masks.reshape(B * L)].reshape(B, M, D)), dim=1)
+            x = torch.cat(
+                (
+                    x[:, :1],
+                    x[:, 1:].reshape(B * L, D)[masks.reshape(B * L)].reshape(B, M, D),
+                ),
+                dim=1,
+            )
 
         if self.register_tokens is not None:
             x = torch.cat(
@@ -1069,7 +1088,6 @@ def vit_giant2(patch_size=16, num_register_tokens=0, **kwargs):
     return model
 
 
-
 class DINOLoss(nn.Module):
     def __init__(
         self,
@@ -1094,7 +1112,9 @@ class DINOLoss(nn.Module):
     @torch.no_grad()
     def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp, n_iterations=3):
         teacher_output = teacher_output.float()
-        Q = torch.exp(teacher_output / teacher_temp).t()  # Q is K-by-B for consistency with notations from our paper
+        Q = torch.exp(
+            teacher_output / teacher_temp
+        ).t()  # Q is K-by-B for consistency with notations from our paper
         B = Q.shape[1]  # number of samples to assign
         K = Q.shape[0]  # how many prototypes
 
@@ -1143,7 +1163,8 @@ class DINOLoss(nn.Module):
         if self.updated is False:
             _t = self.async_batch_center / (self.len_teacher_output)
 
-            self.center = self.center * self.center_momentum + _t * (1 - self.center_momentum)
+            self.center = self.center * self.center_momentum + _t * (
+                1 - self.center_momentum
+            )
 
             self.updated = True
-

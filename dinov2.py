@@ -50,6 +50,62 @@ except ImportError:
 
     warnings.warn("xFormers is not available (Block)")
 
+class TeacherStudent(nn.Module):
+    def __init__(self, teacher_backbone, student_backbone, teacher_head, student_head):
+        super().__init__()
+        self.teacher = nn.ModuleDict(dict(backbone=teacher_backbone, head=teacher_head))
+        self.student = nn.ModuleDict(dict(backbone=student_backbone, head=student_head))
+        for p in self.teacher.parameters():
+            p.requires_grad = False
+
+class DINOHead(nn.Module):
+    def __init__(
+        self,
+        in_dim,
+        out_dim,
+        use_bn=False,
+        nlayers=3,
+        hidden_dim=2048,
+        bottleneck_dim=256,
+        mlp_bias=True,
+    ):
+        super().__init__()
+        nlayers = max(nlayers, 1)
+        self.mlp = _build_mlp(nlayers, in_dim, bottleneck_dim, hidden_dim=hidden_dim, use_bn=use_bn, bias=mlp_bias)
+        self.apply(self._init_weights)
+        self.last_layer = nn.utils.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
+        self.last_layer.weight_g.data.fill_(1)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=0.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x = self.mlp(x)
+        eps = 1e-6 if x.dtype == torch.float16 else 1e-12
+        x = nn.functional.normalize(x, dim=-1, p=2, eps=eps)
+        x = self.last_layer(x)
+        return x
+
+
+def _build_mlp(nlayers, in_dim, bottleneck_dim, hidden_dim=None, use_bn=False, bias=True):
+    if nlayers == 1:
+        return nn.Linear(in_dim, bottleneck_dim, bias=bias)
+    else:
+        layers = [nn.Linear(in_dim, hidden_dim, bias=bias)]
+        if use_bn:
+            layers.append(nn.BatchNorm1d(hidden_dim))
+        layers.append(nn.GELU())
+        for _ in range(nlayers - 2):
+            layers.append(nn.Linear(hidden_dim, hidden_dim, bias=bias))
+            if use_bn:
+                layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.GELU())
+        layers.append(nn.Linear(hidden_dim, bottleneck_dim, bias=bias))
+        return nn.Sequential(*layers)
+
 
 class Mlp(nn.Module):
     def __init__(
@@ -1011,3 +1067,83 @@ def vit_giant2(patch_size=16, num_register_tokens=0, **kwargs):
         **kwargs,
     )
     return model
+
+
+
+class DINOLoss(nn.Module):
+    def __init__(
+        self,
+        out_dim,
+        student_temp=0.1,
+        center_momentum=0.9,
+    ):
+        super().__init__()
+        self.student_temp = student_temp
+        self.center_momentum = center_momentum
+        self.register_buffer("center", torch.zeros(1, out_dim))
+        self.updated = True
+        self.len_teacher_output = None
+        self.async_batch_center = None
+
+    @torch.no_grad()
+    def softmax_center_teacher(self, teacher_output, teacher_temp):
+        self.apply_center_update()
+        # teacher centering and sharpening
+        return F.softmax((teacher_output - self.center) / teacher_temp, dim=-1)
+
+    @torch.no_grad()
+    def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp, n_iterations=3):
+        teacher_output = teacher_output.float()
+        Q = torch.exp(teacher_output / teacher_temp).t()  # Q is K-by-B for consistency with notations from our paper
+        B = Q.shape[1]  # number of samples to assign
+        K = Q.shape[0]  # how many prototypes
+
+        # make the matrix sums to 1
+        sum_Q = torch.sum(Q)
+        Q /= sum_Q
+
+        for it in range(n_iterations):
+            # normalize each row: total weight per prototype must be 1/K
+            sum_of_rows = torch.sum(Q, dim=1, keepdim=True)
+            Q /= sum_of_rows
+            Q /= K
+
+            # normalize each column: total weight per sample must be 1/B
+            Q /= torch.sum(Q, dim=0, keepdim=True)
+            Q /= B
+
+        Q *= B  # the columns must sum to 1 so that Q is an assignment
+        return Q.t()
+
+    def forward(self, student_output_list, teacher_out_softmaxed_centered_list):
+        """
+        Cross-entropy between softmax outputs of the teacher and student networks.
+        """
+        # TODO: Use cross_entropy_distribution here
+        total_loss = 0
+        for s in student_output_list:
+            lsm = F.log_softmax(s / self.student_temp, dim=-1)
+            for t in teacher_out_softmaxed_centered_list:
+                loss = torch.sum(t * lsm, dim=-1)
+                total_loss -= loss.mean()
+        return total_loss
+
+    @torch.no_grad()
+    def update_center(self, teacher_output):
+        self.reduce_center_update(teacher_output)
+
+    @torch.no_grad()
+    def reduce_center_update(self, teacher_output):
+        self.updated = False
+        self.len_teacher_output = len(teacher_output)
+        self.async_batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
+
+    @torch.no_grad()
+    def apply_center_update(self):
+        if self.updated is False:
+            _t = self.async_batch_center / (self.len_teacher_output)
+
+            self.center = self.center * self.center_momentum + _t * (1 - self.center_momentum)
+
+            self.updated = True
+

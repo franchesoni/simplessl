@@ -816,15 +816,16 @@ class VisionTransformer(nn.Module):
         B, nc, w, h = x.shape
         x = self.patch_embed(x)  # (B, L, D)
         B, L, D = x.shape
+
+        x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+        x = x + self.interpolate_pos_encoding(x, w, h)
+
         if masks is not None:
             assert masks.shape == (B, L)
             M = masks[
                 0
             ].sum()  # number of elements to be kept, considered constant for each element of the batch
-            x = x.reshape(B * L, D)[masks.reshape(B * L)].reshape(B, M, D)
-
-        x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
-        x = x + self.interpolate_pos_encoding(x, w, h)
+            x = torch.cat((x[:, :1], x[:, 1:].reshape(B * L, D)[masks.reshape(B * L)].reshape(B, M, D)), dim=1)
 
         if self.register_tokens is not None:
             x = torch.cat(

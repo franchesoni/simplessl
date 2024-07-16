@@ -1,3 +1,4 @@
+# modification of dinov2 code, modifications commented with # modified
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the Apache License, Version 2.0
@@ -40,7 +41,7 @@ try:
 
         XFORMERS_AVAILABLE = True
         # warnings.warn("xFormers is available (Block)")
-        print('Using xFormers!', end='\r')
+        print("Using xFormers!", end="\r")
     else:
         warnings.warn("xFormers is disabled (Block)")
         raise ImportError
@@ -194,7 +195,7 @@ try:
 
         XFORMERS_AVAILABLE = True
         # warnings.warn("xFormers is available (SwiGLU)")
-        print('Using xFormers!', end='\r')
+        print("Using xFormers!", end="\r")
     else:
         warnings.warn("xFormers is disabled (SwiGLU)")
         raise ImportError
@@ -233,7 +234,7 @@ try:
 
         XFORMERS_AVAILABLE = True
         # warnings.warn("xFormers is available (Attention)")
-        print('Using xFormers!', end='\r')
+        print("Using xFormers!", end="\r")
     else:
         warnings.warn("xFormers is disabled (Attention)")
         raise ImportError
@@ -807,13 +808,20 @@ class VisionTransformer(nn.Module):
             previous_dtype
         )
 
-    def prepare_tokens_with_masks(self, x, masks=None):
+    def prepare_tokens_with_masks(
+        self, x, masks=None
+    ):  # modified (masking behavior more similar to MAE now)
+        # if x is (B, 3, H, W), then the embedding before the extra tokens is (B, L, D), where (L) depends on the size of the image and the patch size. L = (H/patch_size) * (W/patch_size).
+        # Then masks should be a boolean tensor of shape (B, L) that indicates with a True those values that should be kept. The same number of tokens are kept for each entry in the batch.
         B, nc, w, h = x.shape
-        x = self.patch_embed(x)
+        x = self.patch_embed(x)  # (B, L, D)
+        B, L, D = x.shape
         if masks is not None:
-            x = torch.where(
-                masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x
-            )
+            assert masks.shape == (B, L)
+            M = masks[
+                0
+            ].sum()  # number of elements to be kept, considered constant for each element of the batch
+            x = x.reshape(B * L, D)[masks.reshape(B * L)].reshape(B, M, D)
 
         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
         x = x + self.interpolate_pos_encoding(x, w, h)
@@ -933,12 +941,8 @@ class VisionTransformer(nn.Module):
             return tuple(zip(outputs, class_tokens))
         return tuple(outputs)
 
-    def forward(self, *args, is_training=False, **kwargs):
-        ret = self.forward_features(*args, **kwargs)
-        if is_training:
-            return ret
-        else:
-            return self.head(ret["x_norm_clstoken"])
+    def forward(self, *args, **kwargs):  # modified
+        return self.forward_features(*args, **kwargs)
 
 
 def init_weights_vit_timm(module: nn.Module, name: str = ""):

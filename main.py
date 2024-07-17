@@ -153,6 +153,7 @@ def validate(
         dl = DataLoader(
             val_ds, batch_size=n_imgs, shuffle=True, num_workers=0, generator=generator
         )
+        ######### QUALITATIVE #########
         library_feats, library_imgs = [], []
         for i, raw_imgs in enumerate(dl):
             imgs = (raw_imgs.to(device) / 255 - 0.5).permute(0, 3, 1, 2)
@@ -189,7 +190,9 @@ def validate(
         reference_feats, library_feats = reference_feats / reference_feats.norm(
             dim=-1, keepdim=True
         ), library_feats / library_feats.norm(dim=-1, keepdim=True)
-        sim = torch.einsum("bd,cd->bc", reference_feats, library_feats)  # (B, search_among)
+        sim = torch.einsum(
+            "bd,cd->bc", reference_feats, library_feats
+        )  # (B, search_among)
         retrieval_indices = sim.argmax(dim=1).cpu()  # (B,)
         for i in range(n_imgs):
             joined_img = torch.cat(
@@ -223,7 +226,11 @@ def main(
     seed_everything(seed)
     hparams = copy.deepcopy(locals())  # these are roughly the args passed to main
     command = " ".join(sys.argv)
-    if not dev:
+    if dev:
+        writer = None
+        img_logdir = Path("tmp")
+        img_logdir.mkdir(exist_ok=True, parents=True)
+    else:
         writer = SummaryWriter(comment=tag)
         img_logdir = Path(writer.get_logdir()) / "images"
         img_logdir.mkdir(exist_ok=True, parents=True)
@@ -285,6 +292,7 @@ def main(
     ####### LOOP #########
     global_step = 0
     st = time.time()
+    past_teacher_cls_tokens_after_head, max_past_tokens = [], 2**15
     while global_step < steps:
         for imgs in train_dl:
             # imgs is (B, 3, H, W)
@@ -307,6 +315,10 @@ def main(
                 out_teacher = models.teacher.backbone(imgs, masks_teacher)
                 teacher_cls_tokens = out_teacher["x_norm_clstoken"]
                 teacher_cls_tokens_after_head = models.teacher.head(teacher_cls_tokens)
+                # save the teacher cls tokens after the head for rankme computation
+                if len(past_teacher_cls_tokens_after_head) >= max_past_tokens:
+                    past_teacher_cls_tokens_after_head.pop(0)
+                past_teacher_cls_tokens_after_head.append(teacher_cls_tokens_after_head)
                 teacher_dino_softmaxed_centered = dino_loss.softmax_center_teacher(
                     teacher_cls_tokens_after_head, teacher_temp=0.05
                 )
@@ -325,7 +337,8 @@ def main(
             optimizer.step()
             models.update_teacher(teacher_momentum)
 
-            writer.add_scalar("train/total_loss", total_loss.item(), global_step)
+            if writer:
+                writer.add_scalar("train/total_loss", total_loss.item(), global_step)
             print(
                 f"{global_step}/{steps}={(global_step / steps * 100):.2f}%| "
                 f"Loss {total_loss.item():.3e}| "
@@ -335,16 +348,38 @@ def main(
             )
 
             if global_step % val_every == 0:
-                print("Validating...", end="\r")
-                validate(val_ds, models, device, global_step, img_logdir)
+                print("Validating qualitatively...", end="\r")
+                validate(
+                    val_ds, models, device, global_step, img_logdir, writer, num_workers
+                )
+                # compute RankMe
+                print("Computing RankMe...", end="\r")
+                past_teacher_cls_tokens_after_head = torch.cat(
+                    past_teacher_cls_tokens_after_head, dim=0
+                )  # (n_imgs_svd, D)
+                singular_values = torch.linalg.svdvals(
+                    past_teacher_cls_tokens_after_head
+                )
+                pks = singular_values / torch.linalg.norm(singular_values, ord=1) + 1e-7
+                rankme = torch.exp(-torch.sum(pks * torch.log(pks)))
+                if writer:
+                    writer.add_scalar("train/rankme", rankme.item(), global_step)
+                past_teacher_cls_tokens_after_head = []
+                # save teacher
+                teacher_state_dict = models.teacher.state_dict()
+                torch.save(
+                    teacher_state_dict,
+                    Path(writer.get_logdir()) / "last_validated_teacher.pth",
+                )
 
             global_step += 1
             if global_step >= steps:
                 break
 
     # log and checkpoint
-    with open(Path(writer.get_logdir()) / "done.txt", "w") as f:
-        f.write("done")
+    if not dev:
+        with open(Path(writer.get_logdir()) / "done.txt", "w") as f:
+            f.write("done")
 
 
 if __name__ == "__main__":

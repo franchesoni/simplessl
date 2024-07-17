@@ -96,30 +96,58 @@ def center_crop_and_resize(img, size=224):
     return img
 
 
-jitter, grayscale, blur, solarize = (
-    transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1),
+grayscale, blur, solarize = (
     transforms.Grayscale(),
     transforms.GaussianBlur(kernel_size=9),
-    transforms.RandomSolarize(threshold=128),
+    transforms.RandomSolarize(threshold=0.5),
 )
 
 
-def pseudo_random_augment(img_batch):
+def random_augment(img_batch, vis=False):
     """
     Random augmentations following DINOv2. Flip with 0.5 prob, color jittering with 0.8 prob, grayscale with 0.2 prob, blur with 0.5, solarize with 0.2.
     Because we have a batch, we favor pseudo-random augmentations. We will apply augmentations to the proportion of the images given by the probabilities.
     """
+    if vis:
+        for i in range(10):
+            Image.fromarray(
+                (img_batch[i].permute(1, 2, 0).cpu().numpy()).astype(np.uint8)
+            ).save(f"tmp/{i}_raw.png")
     B = img_batch.shape[0]
     # 1. we flip the first half of the batch, as the batch is random it's a random flip
     img_batch[: B // 2] = torch.flip(img_batch[: B // 2], dims=[3])  # last half
-    # 2. apply color jitter to 80% of the images, half of them are flipped. Ignore which images are flipped
-    img_batch[: (8 * B) // 10] = jitter(img_batch[: (8 * B) // 10])  # first 80%
+
+    # The following commented lines apply the same color jitter, we can do more diverse, ignoring hue
+    # # 2. apply color jitter to 80% of the images, half of them are flipped. Ignore which images are flipped
+    # img_batch[: (8 * B) // 10] = jitter(img_batch[: (8 * B) // 10])  # first 80%
+    gray_batch = img_batch.mean(dim=1, keepdim=True)  # (B, 1, H, W)
+    mean_gray_batch = gray_batch.mean(dim=[2, 3], keepdim=True)  # (B, 1, 1, 1)
+    bright_f, contrast_f, saturation_f = (
+        torch.rand(3, (8 * B) // 10, 1, 1, 1, device=img_batch.device) * 2
+    )
+    img_batch[: (8 * B) // 10] = torch.clip(
+        (
+            img_batch[: (8 * B) // 10] * (bright_f + contrast_f + saturation_f)
+            + mean_gray_batch[: (8 * B) // 10] * (1 - contrast_f)
+            + gray_batch[: (8 * B) // 10] * (1 - saturation_f)
+        )
+        // 3,
+        0,
+        255,
+    )
+
     # 3. apply grayscale to 20% of the images, Ignore which images are flipped or jittered
-    img_batch[: B // 5] = grayscale(img_batch[: B // 5])
+    img_batch[: B // 5] = gray_batch[: B // 5].repeat(1, 3, 1, 1)
     # 4. apply gaussian blur to half of the images, all jittered, all flipped, few grayscale (10%-60%)
     img_batch[B // 10 : (6 * B) // 10] = blur(img_batch[B // 10 : (6 * B) // 10])
     # 5. apply solarize to the images that are not color jittered
     img_batch[-B // 5 :] = solarize(img_batch[-B // 5 :])
+    if vis:
+        for i in range(10):
+            Image.fromarray(
+                (img_batch[i].permute(1, 2, 0).cpu().numpy()).astype(np.uint8)
+            ).save(f"tmp/{i}_transformed.png")
+
     return img_batch
 
 
@@ -381,7 +409,7 @@ def main(
         for img_batch in train_dl:
             # img_batch is (B, H, W, 3)
             img_batch = img_batch.permute(0, 3, 1, 2)  # (B 3 H W)
-            img_batch = pseudo_random_augment(img_batch)
+            img_batch = random_augment(img_batch, vis=True)
             img_batch = img_batch / 255 - 0.5  # normalize [-0.5, 0.5]
 
             # now we need to create the masks that will leave vs visible patches for the student and vt for the teacher, and the teacher sees all those of the student.

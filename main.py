@@ -147,60 +147,57 @@ def validate(
     val_ds, models, device, global_step, img_logdir, n_imgs=8, search_among=128
 ):
     assert search_among % n_imgs == 0, "search_among must be divisible by n_imgs"
-    with torch.no_grad():
-        generator = torch.Generator()  # always sample the same images
-        generator.manual_seed(0)
-        dl = DataLoader(
-            val_ds, batch_size=n_imgs, shuffle=True, num_workers=0, generator=generator
-        )
-        ######### QUALITATIVE #########
-        library_feats, library_imgs = [], []
-        for i, raw_imgs in enumerate(dl):
-            imgs = (raw_imgs.to(device) / 255 - 0.5).permute(0, 3, 1, 2)
-            out = models.teacher.backbone(imgs)
-            if i == 0:
-                # First do a pca of the embeddings for each patch and save hte color images
-                pca = PCA(n_components=3)
-                patch_features = out["x_norm_patchtokens"]
-                B, L, D = patch_features.shape
-                rgb_features = pca.fit_transform(
-                    patch_features.reshape(B * L, D).cpu().numpy()
-                ).reshape(B, L, 3)
-                rgb_features = pct_norm(rgb_features).reshape(
-                    B, int(L ** (1 / 2)), int(L ** (1 / 2)), 3
+    generator = torch.Generator()  # always sample the same images
+    generator.manual_seed(0)
+    dl = DataLoader(
+        val_ds, batch_size=n_imgs, shuffle=True, num_workers=0, generator=generator
+    )
+    ######### QUALITATIVE #########
+    library_feats, library_imgs = [], []
+    for i, raw_imgs in enumerate(dl):
+        imgs = (raw_imgs.to(device) / 255 - 0.5).permute(0, 3, 1, 2)
+        out = models.teacher.backbone(imgs)
+        if i == 0:
+            # First do a pca of the embeddings for each patch and save hte color images
+            pca = PCA(n_components=3)
+            patch_features = out["x_norm_patchtokens"]
+            B, L, D = patch_features.shape
+            rgb_features = pca.fit_transform(
+                patch_features.reshape(B * L, D).cpu().numpy()
+            ).reshape(B, L, 3)
+            rgb_features = pct_norm(rgb_features).reshape(
+                B, int(L ** (1 / 2)), int(L ** (1 / 2)), 3
+            )
+            for i, raw_img in enumerate(raw_imgs):
+                Image.fromarray(raw_img.numpy()).save(
+                    str(img_logdir / f"step_{global_step}_{i}_color.jpg")
                 )
-                for i, raw_img in enumerate(raw_imgs):
-                    Image.fromarray(raw_img.numpy()).save(
-                        str(img_logdir / f"step_{global_step}_{i}_color.jpg")
-                    )
-                    Image.fromarray((rgb_features[i] * 255).astype(np.uint8)).save(
-                        str(img_logdir / f"step_{global_step}_{i}_pca.jpg")
-                    )
-                # we keep the first batch of images to compare with the rest in retrieval
-                reference_feats = out["x_norm_clstoken"]  # (B, D)
-                reference_imgs = raw_imgs  # (B, H, W, 3)
-            else:
-                library_feats.append(out["x_norm_clstoken"])  # (B, D)
-                library_imgs.append(raw_imgs)
-            if i == search_among // n_imgs:
-                break
-        library_feats = torch.cat(library_feats, dim=0)  # (search_among, D)
-        library_imgs = torch.cat(library_imgs, dim=0)  # (search_among, H, W, 3)
-        # compute cosine similarity
-        reference_feats, library_feats = reference_feats / reference_feats.norm(
-            dim=-1, keepdim=True
-        ), library_feats / library_feats.norm(dim=-1, keepdim=True)
-        sim = torch.einsum(
-            "bd,cd->bc", reference_feats, library_feats
-        )  # (B, search_among)
-        retrieval_indices = sim.argmax(dim=1).cpu()  # (B,)
-        for i in range(n_imgs):
-            joined_img = torch.cat(
-                [reference_imgs[i], library_imgs[retrieval_indices[i]]], dim=1
-            )
-            Image.fromarray(joined_img.cpu().numpy()).save(
-                str(img_logdir / f"step_{global_step}_{i}_retrieval.jpg")
-            )
+                Image.fromarray((rgb_features[i] * 255).astype(np.uint8)).save(
+                    str(img_logdir / f"step_{global_step}_{i}_pca.jpg")
+                )
+            # we keep the first batch of images to compare with the rest in retrieval
+            reference_feats = out["x_norm_clstoken"]  # (B, D)
+            reference_imgs = raw_imgs  # (B, H, W, 3)
+        else:
+            library_feats.append(out["x_norm_clstoken"])  # (B, D)
+            library_imgs.append(raw_imgs)
+        if i == search_among // n_imgs:
+            break
+    library_feats = torch.cat(library_feats, dim=0)  # (search_among, D)
+    library_imgs = torch.cat(library_imgs, dim=0)  # (search_among, H, W, 3)
+    # compute cosine similarity
+    reference_feats, library_feats = reference_feats / reference_feats.norm(
+        dim=-1, keepdim=True
+    ), library_feats / library_feats.norm(dim=-1, keepdim=True)
+    sim = torch.einsum("bd,cd->bc", reference_feats, library_feats)  # (B, search_among)
+    retrieval_indices = sim.argmax(dim=1).cpu()  # (B,)
+    for i in range(n_imgs):
+        joined_img = torch.cat(
+            [reference_imgs[i], library_imgs[retrieval_indices[i]]], dim=1
+        )
+        Image.fromarray(joined_img.cpu().numpy()).save(
+            str(img_logdir / f"step_{global_step}_{i}_retrieval.jpg")
+        )
 
 
 def main(
@@ -292,7 +289,6 @@ def main(
     ####### LOOP #########
     global_step = 0
     st = time.time()
-    past_teacher_cls_tokens_after_head, max_past_tokens = [], 2**15
     while global_step < steps:
         for imgs in train_dl:
             # imgs is (B, 3, H, W)
@@ -302,6 +298,7 @@ def main(
             # random augmentation
             B = imgs.shape[0]
             flip = torch.rand(B) < 0.5
+
             # now we need to create the masks that will leave vs visible patches for the student and vt for the teacher, and the teacher sees all those of the student.
             masks_student, masks_teacher = create_random_masks(
                 B=imgs.shape[0],
@@ -315,10 +312,6 @@ def main(
                 out_teacher = models.teacher.backbone(imgs, masks_teacher)
                 teacher_cls_tokens = out_teacher["x_norm_clstoken"]
                 teacher_cls_tokens_after_head = models.teacher.head(teacher_cls_tokens)
-                # save the teacher cls tokens after the head for rankme computation
-                if len(past_teacher_cls_tokens_after_head) >= max_past_tokens:
-                    past_teacher_cls_tokens_after_head.pop(0)
-                past_teacher_cls_tokens_after_head.append(teacher_cls_tokens_after_head)
                 teacher_dino_softmaxed_centered = dino_loss.softmax_center_teacher(
                     teacher_cls_tokens_after_head, teacher_temp=0.05
                 )
@@ -349,28 +342,32 @@ def main(
 
             if global_step % val_every == 0:
                 print("Validating qualitatively...", end="\r")
-                validate(
-                    val_ds, models, device, global_step, img_logdir, writer, num_workers
-                )
-                # compute RankMe
-                print("Computing RankMe...", end="\r")
-                past_teacher_cls_tokens_after_head = torch.cat(
-                    past_teacher_cls_tokens_after_head, dim=0
-                )  # (n_imgs_svd, D)
-                singular_values = torch.linalg.svdvals(
-                    past_teacher_cls_tokens_after_head
-                )
-                pks = singular_values / torch.linalg.norm(singular_values, ord=1) + 1e-7
-                rankme = torch.exp(-torch.sum(pks * torch.log(pks)))
-                if writer:
-                    writer.add_scalar("train/rankme", rankme.item(), global_step)
-                past_teacher_cls_tokens_after_head = []
-                # save teacher
-                teacher_state_dict = models.teacher.state_dict()
-                torch.save(
-                    teacher_state_dict,
-                    Path(writer.get_logdir()) / "last_validated_teacher.pth",
-                )
+                with torch.no_grad():
+                    validate(
+                        val_ds,
+                        models,
+                        device,
+                        global_step,
+                        img_logdir,
+                    )
+                    # compute RankMe
+                    print("Computing RankMe...", end="\r")
+                    singular_values = torch.linalg.svdvals(
+                        models.teacher.head.last_layer.weight  # (out_dim, in_dim)
+                    )
+                    pks = (
+                        singular_values / torch.linalg.norm(singular_values, ord=1)
+                        + 1e-7
+                    )
+                    rankme = torch.exp(-torch.sum(pks * torch.log(pks)))
+                    if not dev:
+                        writer.add_scalar("train/rankme", rankme.item(), global_step)
+                        # save teacher
+                        teacher_state_dict = models.teacher.state_dict()
+                        torch.save(
+                            teacher_state_dict,
+                            Path(writer.get_logdir()) / "last_validated_teacher.pth",
+                        )
 
             global_step += 1
             if global_step >= steps:

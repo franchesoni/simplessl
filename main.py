@@ -317,6 +317,7 @@ def main(
     val_every=1000,
     patches_student=8,
     patches_teacher=32,
+    patch_size=14,
     out_dim=65536,  # default DINOv2 out_dim
     teacher_momentum=0.997,
     lr=0.01,
@@ -373,9 +374,9 @@ def main(
         device=device,
     )
     ####### MODEL ########
-    teacher_backbone = vit_large(patch_size=14, num_register_tokens=4)
+    teacher_backbone = vit_large(patch_size=patch_size, num_register_tokens=4)
     student_backbone = vit_large(
-        patch_size=14, num_register_tokens=4, drop_path_rate=0.4, drop_path_uniform=True
+        patch_size=patch_size, num_register_tokens=4, drop_path_rate=0.4, drop_path_uniform=True
     )
     teacher_head = DINOHead(
         in_dim=teacher_backbone.embed_dim,
@@ -415,7 +416,7 @@ def main(
             # now we need to create the masks that will leave vs visible patches for the student and vt for the teacher, and the teacher sees all those of the student.
             masks_student, masks_teacher = create_random_masks(
                 B=img_batch.shape[0],
-                L=256,
+                L=(image_size//patch_size)**2,
                 V1=patches_student,
                 V2=patches_teacher,
                 device=device,

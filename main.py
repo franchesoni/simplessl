@@ -138,6 +138,7 @@ cfg = dict(  # default dino config
 
 
 def main(
+    path_to_imagenet="/export/home/data/imagenet",  # the expected data structure is IMAGENET_PATH/image_name.JPEG where image_name is the name of the image in the train set. We use no val or test set.
     steps=1000,
     patches_student=8,
     patches_teacher=32,
@@ -174,10 +175,10 @@ def main(
 
     ######## DATA ########
     train_ds = ImageNetImageDataset(
-        IMAGENET_PATH, transform=RandomResizedCropAndInterpolation(image_size)
+        path_to_imagenet, transform=RandomResizedCropAndInterpolation(image_size)
     )
     val_ds = ImageNetImageDataset(
-        IMAGENET_PATH, transform=partial(center_crop_and_resize, size=image_size)
+        path_to_imagenet, transform=partial(center_crop_and_resize, size=image_size)
     )
     train_dl = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True

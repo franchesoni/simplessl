@@ -14,9 +14,9 @@ import cv2
 import torch
 import schedulefree as sfoptim
 from PIL import Image
+from sklearn.decomposition import PCA
 
 
-from config import IMAGENET_PATH
 from dinov2 import vit_small, DINOHead, TeacherStudent, DINOLoss
 
 
@@ -50,9 +50,15 @@ class ImageNetImageDataset(Dataset):
             try:  # if it doesn't work use PIL, decently fast
                 img = np.array(Image.open(self.image_paths[idx]).convert("RGB"))
                 print("Read with PIL!", end="\r")
-            except Exception as e:  # if PIL also doesn't work, report the image and return a black or a white image.
-                print(f"Error reading with simplejpeg and PIL {self.image_paths[idx]}: {e}. The image is probably corrupted, returning a plain image.")
-                return np.ones((224, 224, 3), dtype=np.uint8) * 255 * (idx % 2),  # return a white or black image
+            except (
+                Exception
+            ) as e:  # if PIL also doesn't work, report the image and return a black or a white image.
+                print(
+                    f"Error reading with simplejpeg and PIL {self.image_paths[idx]}: {e}. The image is probably corrupted, returning a plain image."
+                )
+                return (
+                    np.ones((224, 224, 3), dtype=np.uint8) * 255 * (idx % 2),
+                )  # return a white or black image
         img = self.transform(img)
         return img
 
@@ -132,17 +138,75 @@ def create_random_masks(B, L, V1, V2, device):
     return masks1, masks2
 
 
-cfg = dict(  # default dino config
-    dino=dict(head_n_prototypes=65536),
-)
+def pct_norm(x, p=1):
+    newmin, newmax = np.percentile(x, p), np.percentile(x, 100 - p)
+    return np.clip((x - newmin) / (newmax - newmin), 0, 1)
+
+
+def validate(
+    val_ds, models, device, global_step, img_logdir, n_imgs=8, search_among=128
+):
+    assert search_among % n_imgs == 0, "search_among must be divisible by n_imgs"
+    generator = torch.Generator()  # always sample the same images
+    generator.manual_seed(0)
+    dl = DataLoader(
+        val_ds, batch_size=n_imgs, shuffle=True, num_workers=0, generator=generator
+    )
+    library_feats, library_imgs = [], []
+    for i, raw_imgs in enumerate(dl):
+        imgs = (raw_imgs.to(device) / 255 - 0.5).permute(0, 3, 1, 2)
+        out = models.teacher.backbone(imgs)
+        if i == 0:
+            # First do a pca of the embeddings for each patch and save hte color images
+            pca = PCA(n_components=3)
+            patch_features = out["x_norm_patchtokens"]
+            B, L, D = patch_features.shape
+            rgb_features = pca.fit_transform(
+                patch_features.reshape(B * L, D).cpu().numpy()
+            ).reshape(B, L, 3)
+            rgb_features = pct_norm(rgb_features).reshape(
+                B, int(L ** (1 / 2)), int(L ** (1 / 2)), 3
+            )
+            for i, raw_img in enumerate(raw_imgs):
+                Image.fromarray(raw_img.numpy()).save(
+                    str(img_logdir / f"step_{global_step}_{i}_color.jpg")
+                )
+                Image.fromarray((rgb_features[i] * 255).astype(np.uint8)).save(
+                    str(img_logdir / f"step_{global_step}_{i}_pca.jpg")
+                )
+            # we keep the first batch of images to compare with the rest in retrieval
+            reference_feats = out["x_norm_clstoken"]  # (B, D)
+            reference_imgs = raw_imgs  # (B, H, W, 3)
+        else:
+            library_feats.append(out["x_norm_clstoken"])  # (B, D)
+            library_imgs.append(raw_imgs)
+        if i == search_among // n_imgs:
+            break
+    library_feats = torch.cat(library_feats, dim=0)  # (search_among, D)
+    library_imgs = torch.cat(library_imgs, dim=0)  # (search_among, H, W, 3)
+    # compute cosine similarity
+    reference_feats, library_feats = reference_feats / reference_feats.norm(
+        dim=-1, keepdim=True
+    ), library_feats / library_feats.norm(dim=-1, keepdim=True)
+    sim = torch.einsum("bd,cd->bc", reference_feats, library_feats)  # (B, search_among)
+    retrieval_indices = sim.argmax(dim=1).cpu()  # (B,)
+    for i in range(n_imgs):
+        joined_img = torch.cat(
+            [reference_imgs[i], library_imgs[retrieval_indices[i]]], dim=1
+        )
+        Image.fromarray(joined_img.cpu().numpy()).save(
+            str(img_logdir / f"step_{global_step}_{i}_retrieval.jpg")
+        )
 
 
 def main(
     path_to_imagenet="/export/home/data/imagenet",  # the expected data structure is IMAGENET_PATH/image_name.JPEG where image_name is the name of the image in the train set. We use no val or test set.
-    steps=1000,
+    steps=10000,
+    val_every=1000,
     patches_student=8,
     patches_teacher=32,
-    teacher_momentum=0.994,
+    out_dim=65536,  # default DINOv2 out_dim
+    teacher_momentum=0.997,
     lr=0.01,
     beta=0.9,
     weight_decay=0.0,
@@ -181,21 +245,29 @@ def main(
         path_to_imagenet, transform=partial(center_crop_and_resize, size=image_size)
     )
     train_dl = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        drop_last=True,
     )
     ####### MODEL ########
     teacher_backbone = vit_small(patch_size=14, num_register_tokens=4)
-    student_backbone = vit_small(patch_size=14, num_register_tokens=4)
+    student_backbone = vit_small(
+        patch_size=14, num_register_tokens=4, drop_path_rate=0.4, drop_path_uniform=True
+    )
     teacher_head = DINOHead(
-        in_dim=teacher_backbone.embed_dim, out_dim=cfg["dino"]["head_n_prototypes"]
+        in_dim=teacher_backbone.embed_dim,
+        out_dim=out_dim,
     )
     student_head = DINOHead(
-        in_dim=student_backbone.embed_dim, out_dim=cfg["dino"]["head_n_prototypes"]
+        in_dim=student_backbone.embed_dim,
+        out_dim=out_dim,
     )
     models = TeacherStudent(
         teacher_backbone, student_backbone, teacher_head, student_head
     ).to(device)
-    dino_loss = DINOLoss(out_dim=cfg["dino"]["head_n_prototypes"]).to(device)
+    dino_loss = DINOLoss(out_dim=out_dim).to(device)
 
     ######## OPTIMIZER ########
     optimizer = sfoptim.AdamWScheduleFree(
@@ -258,12 +330,16 @@ def main(
                 end="\r",
             )
 
+            if global_step % val_every == 0:
+                print("Validating...", end="\r")
+                validate(val_ds, models, device, global_step, img_logdir)
+
             global_step += 1
             if global_step >= steps:
                 break
 
     # log and checkpoint
-    with open(writer.get_logdir() / "done.txt", "w") as f:
+    with open(Path(writer.get_logdir()) / "done.txt", "w") as f:
         f.write("done")
 
 

@@ -1,4 +1,4 @@
-
+import time
 from pathlib import Path
 from functools import partial
 import json
@@ -12,23 +12,24 @@ from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import cv2
 import torch
+import schedulefree as sfoptim
 
 
 from config import IMAGENET_PATH
-from vit import vit_small
+from dinov2 import vit_small, DINOHead, TeacherStudent, DINOLoss
 
 
 ## DATA
 class ImageNetImageDataset(Dataset):
     def __init__(self, path, transform=None):
         self.path = Path(path)
+        print(f"Loading image paths from {self.path}...", end='\r')
         if Path("image_paths_cache.npy").exists():
             self.image_paths = np.load("image_paths_cache.npy", allow_pickle=True)
         else:
-            print(f"Loading image paths from {self.path}...")
             self.image_paths = np.array(sorted(self.path.glob('*.JPEG')))
             np.save("image_paths_cache.npy", self.image_paths)
-        print('Done loading image paths.')
+        print('Done loading image paths.', end='\r')
         if transform is None:
             self.transform = lambda x: x
         else:
@@ -104,9 +105,29 @@ def get_current_git_commit():
         print("An error occurred while trying to retrieve the git commit hash.")
         return None
 
+def create_random_masks(B, L, V1, V2, device):
+    """
+    Creates two masks tensors of shape (B, L) that have exactly V positive entries per batch element.
+    """
+    # Create a tensor of indices
+    indices = torch.arange(L, device=device).unsqueeze(0).expand(B, L)
+    
+    # Create random permutations for each batch
+    permutations = torch.argsort(torch.rand(B, L, device=device), dim=1)
+    
+    # Use the permutations to shuffle the indices
+    shuffled_indices = torch.gather(indices, 1, permutations)
+    
+    # Create the mask by comparing with M
+    masks1 = shuffled_indices < V1
+    masks2 = shuffled_indices < V2
+    return masks1, masks2
 
+cfg = dict(  # default dino config
+dino=dict(head_n_prototypes=65536),
+)
 
-def main(batch_size=32, image_size=224, seed=0, tag="", dev=False):
+def main(steps=1000, lr=0.01, beta=0.9, weight_decay=0.0, batch_size=32, image_size=224, device='cuda' if torch.cuda.is_available() else 'cpu', seed=0, tag="", dev=False):
     ####### SET UP (logging) ########
     seed_everything(seed)
     hparams = copy.deepcopy(locals())  # these are roughly the args passed to main
@@ -116,16 +137,67 @@ def main(batch_size=32, image_size=224, seed=0, tag="", dev=False):
         img_logdir = Path(logger.get_logdir()) / "images"
         img_logdir.mkdir(exist_ok=True, parents=True)
         with open(Path(logger.get_logdir()) / "hparams.txt", "w") as f:
-            json.dump({"command": command, "git_commit": get_current_git_commit(), "script_file": Path(__file__), **hparams}, f)
+            json.dump({"command": command, "git_commit": get_current_git_commit(), "script_file": str(Path(__file__)), **hparams}, f)
+    breakpoint()
+        
     ######## DATA ########
     train_ds = ImageNetImageDataset(IMAGENET_PATH, transform=RandomResizedCropAndInterpolation(image_size))
     val_ds = ImageNetImageDataset(IMAGENET_PATH, transform=partial(center_crop_and_resize, size=image_size))
-    train_dl = torch.utils.data.DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    for i in range(10):
-        img_train = train_ds[i]
-        img_test = val_ds[i]
-        model = vit_small(patch_size=14, num_register_tokens=4)#, interpolate_antialias=True, interpolate_offset=0.0)
-        breakpoint()
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=batch_size)
+    ####### MODEL ########
+    teacher_backbone = vit_small(patch_size=14, num_register_tokens=4)
+    student_backbone = vit_small(patch_size=14, num_register_tokens=4)
+    teacher_head = DINOHead(in_dim=teacher_backbone.embed_dim, out_dim=cfg['dino']['head_n_prototypes'])
+    student_head = DINOHead(in_dim=student_backbone.embed_dim, out_dim=cfg['dino']['head_n_prototypes'])
+    models = TeacherStudent(teacher_backbone, student_backbone, teacher_head, student_head).to(device)
+    dino_loss = DINOLoss(out_dim=cfg['dino']['head_n_prototypes']).to(device)
+
+    ######## OPTIMIZER ########
+    optimizer = sfoptim.AdamWScheduleFree(
+        models.parameters(), lr=lr, warmup_steps=steps // 20, betas=(beta, 0.999), weight_decay=weight_decay
+    )
+    models.train()
+    models.teacher.eval()  # teacher shouldn't be trained
+    optimizer.train()
+
+    ####### LOOP #########
+    global_step = 0
+    st = time.time()
+    while global_step < steps:
+        for imgs in train_dl:
+            # imgs is (B, 3, H, W)
+            imgs = (imgs.to(device, non_blocking=True) / 255 - 0.5).permute(0,3,1,2)  # go from uint8 numpy to float32 torch tensor B C H W
+            # now we need to create the masks that will leave vs visible patches for the student and vt for the teacher, and the teacher sees all those of the student.
+            masks_student, masks_teacher = create_random_masks(B=batch_size, L=256, V1=8, V2=32, device=device)
+            # let us use simple dino loss
+            with torch.no_grad():
+                out_teacher = models.teacher.backbone(imgs, masks_teacher)
+                teacher_cls_tokens = out_teacher["x_norm_clstoken"]
+                teacher_cls_tokens_after_head = models.teacher.head(teacher_cls_tokens)
+                teacher_dino_softmaxed_centered = dino_loss.softmax_center_teacher(teacher_cls_tokens_after_head, teacher_temp=0.05)
+                dino_loss.update_center(teacher_cls_tokens_after_head)
+            out_student = student_backbone(imgs, masks_student)
+            student_cls_tokens = out_student["x_norm_clstoken"]
+            student_cls_tokens_after_head = models.student.head(student_cls_tokens)
+            dino_global_loss = dino_loss(student_output_list=[student_cls_tokens_after_head], teacher_out_softmaxed_centered_list=[teacher_dino_softmaxed_centered])
+            total_loss = dino_global_loss
+
+            optimizer.zero_grad(set_to_none=True)
+            total_loss.backward()
+            optimizer.step()
+
+            print(
+                f"{global_step}/{steps}={(global_step / steps * 100):.2f}%| "
+                f"Loss {total_loss.item():.3e}| "
+                f"Speed {(global_step + 1) / (time.time() - st):.3e} step/s| ",
+                f"GPU mem {(torch.cuda.memory_allocated(device) + torch.cuda.memory_reserved(device)) / 1e9:.2f} GB",
+                end="\r",
+            )
+
+            global_step += 1
+            if global_step >= steps:
+                break
+
 
 
 

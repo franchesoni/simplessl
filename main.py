@@ -17,7 +17,7 @@ from PIL import Image
 from sklearn.decomposition import PCA
 
 
-from dinov2 import vit_small, DINOHead, TeacherStudent, DINOLoss
+from dinov2 import vit_small, vit_large, DINOHead, TeacherStudent, DINOLoss
 
 
 ## DATA
@@ -147,56 +147,57 @@ def validate(
     val_ds, models, device, global_step, img_logdir, n_imgs=8, search_among=128
 ):
     assert search_among % n_imgs == 0, "search_among must be divisible by n_imgs"
-    generator = torch.Generator()  # always sample the same images
-    generator.manual_seed(0)
-    dl = DataLoader(
-        val_ds, batch_size=n_imgs, shuffle=True, num_workers=0, generator=generator
-    )
-    library_feats, library_imgs = [], []
-    for i, raw_imgs in enumerate(dl):
-        imgs = (raw_imgs.to(device) / 255 - 0.5).permute(0, 3, 1, 2)
-        out = models.teacher.backbone(imgs)
-        if i == 0:
-            # First do a pca of the embeddings for each patch and save hte color images
-            pca = PCA(n_components=3)
-            patch_features = out["x_norm_patchtokens"]
-            B, L, D = patch_features.shape
-            rgb_features = pca.fit_transform(
-                patch_features.reshape(B * L, D).cpu().numpy()
-            ).reshape(B, L, 3)
-            rgb_features = pct_norm(rgb_features).reshape(
-                B, int(L ** (1 / 2)), int(L ** (1 / 2)), 3
+    with torch.no_grad():
+        generator = torch.Generator()  # always sample the same images
+        generator.manual_seed(0)
+        dl = DataLoader(
+            val_ds, batch_size=n_imgs, shuffle=True, num_workers=0, generator=generator
+        )
+        library_feats, library_imgs = [], []
+        for i, raw_imgs in enumerate(dl):
+            imgs = (raw_imgs.to(device) / 255 - 0.5).permute(0, 3, 1, 2)
+            out = models.teacher.backbone(imgs)
+            if i == 0:
+                # First do a pca of the embeddings for each patch and save hte color images
+                pca = PCA(n_components=3)
+                patch_features = out["x_norm_patchtokens"]
+                B, L, D = patch_features.shape
+                rgb_features = pca.fit_transform(
+                    patch_features.reshape(B * L, D).cpu().numpy()
+                ).reshape(B, L, 3)
+                rgb_features = pct_norm(rgb_features).reshape(
+                    B, int(L ** (1 / 2)), int(L ** (1 / 2)), 3
+                )
+                for i, raw_img in enumerate(raw_imgs):
+                    Image.fromarray(raw_img.numpy()).save(
+                        str(img_logdir / f"step_{global_step}_{i}_color.jpg")
+                    )
+                    Image.fromarray((rgb_features[i] * 255).astype(np.uint8)).save(
+                        str(img_logdir / f"step_{global_step}_{i}_pca.jpg")
+                    )
+                # we keep the first batch of images to compare with the rest in retrieval
+                reference_feats = out["x_norm_clstoken"]  # (B, D)
+                reference_imgs = raw_imgs  # (B, H, W, 3)
+            else:
+                library_feats.append(out["x_norm_clstoken"])  # (B, D)
+                library_imgs.append(raw_imgs)
+            if i == search_among // n_imgs:
+                break
+        library_feats = torch.cat(library_feats, dim=0)  # (search_among, D)
+        library_imgs = torch.cat(library_imgs, dim=0)  # (search_among, H, W, 3)
+        # compute cosine similarity
+        reference_feats, library_feats = reference_feats / reference_feats.norm(
+            dim=-1, keepdim=True
+        ), library_feats / library_feats.norm(dim=-1, keepdim=True)
+        sim = torch.einsum("bd,cd->bc", reference_feats, library_feats)  # (B, search_among)
+        retrieval_indices = sim.argmax(dim=1).cpu()  # (B,)
+        for i in range(n_imgs):
+            joined_img = torch.cat(
+                [reference_imgs[i], library_imgs[retrieval_indices[i]]], dim=1
             )
-            for i, raw_img in enumerate(raw_imgs):
-                Image.fromarray(raw_img.numpy()).save(
-                    str(img_logdir / f"step_{global_step}_{i}_color.jpg")
-                )
-                Image.fromarray((rgb_features[i] * 255).astype(np.uint8)).save(
-                    str(img_logdir / f"step_{global_step}_{i}_pca.jpg")
-                )
-            # we keep the first batch of images to compare with the rest in retrieval
-            reference_feats = out["x_norm_clstoken"]  # (B, D)
-            reference_imgs = raw_imgs  # (B, H, W, 3)
-        else:
-            library_feats.append(out["x_norm_clstoken"])  # (B, D)
-            library_imgs.append(raw_imgs)
-        if i == search_among // n_imgs:
-            break
-    library_feats = torch.cat(library_feats, dim=0)  # (search_among, D)
-    library_imgs = torch.cat(library_imgs, dim=0)  # (search_among, H, W, 3)
-    # compute cosine similarity
-    reference_feats, library_feats = reference_feats / reference_feats.norm(
-        dim=-1, keepdim=True
-    ), library_feats / library_feats.norm(dim=-1, keepdim=True)
-    sim = torch.einsum("bd,cd->bc", reference_feats, library_feats)  # (B, search_among)
-    retrieval_indices = sim.argmax(dim=1).cpu()  # (B,)
-    for i in range(n_imgs):
-        joined_img = torch.cat(
-            [reference_imgs[i], library_imgs[retrieval_indices[i]]], dim=1
-        )
-        Image.fromarray(joined_img.cpu().numpy()).save(
-            str(img_logdir / f"step_{global_step}_{i}_retrieval.jpg")
-        )
+            Image.fromarray(joined_img.cpu().numpy()).save(
+                str(img_logdir / f"step_{global_step}_{i}_retrieval.jpg")
+            )
 
 
 def main(
@@ -252,8 +253,8 @@ def main(
         drop_last=True,
     )
     ####### MODEL ########
-    teacher_backbone = vit_small(patch_size=14, num_register_tokens=4)
-    student_backbone = vit_small(
+    teacher_backbone = vit_large(patch_size=14, num_register_tokens=4)
+    student_backbone = vit_large(
         patch_size=14, num_register_tokens=4, drop_path_rate=0.4, drop_path_uniform=True
     )
     teacher_head = DINOHead(
@@ -290,6 +291,9 @@ def main(
             imgs = (imgs.to(device, non_blocking=True) / 255 - 0.5).permute(
                 0, 3, 1, 2
             )  # go from uint8 numpy to float32 torch tensor B C H W
+            # random augmentation
+            B = imgs.shape[0]
+            flip = torch.rand(B) < 0.5
             # now we need to create the masks that will leave vs visible patches for the student and vt for the teacher, and the teacher sees all those of the student.
             masks_student, masks_teacher = create_random_masks(
                 B=imgs.shape[0],

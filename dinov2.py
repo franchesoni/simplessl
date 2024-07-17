@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 from torch.nn.init import trunc_normal_
+import numpy as np
 
 
 import os
@@ -59,6 +60,21 @@ class TeacherStudent(nn.Module):
         for p in self.teacher.parameters():
             p.requires_grad = False
 
+    def update_teacher(self, m):
+        with torch.no_grad():
+            for k in self.student.keys():
+                student_module = self.student[k]
+                teacher_module = self.teacher[k]
+
+                # Ensure that the two modules have the same structure
+                assert len(list(student_module.parameters())) == len(list(teacher_module.parameters())), "Student and teacher modules must have the same number of parameters."
+
+                student_param_list = list(student_module.parameters())
+                teacher_param_list = list(teacher_module.parameters())
+
+                for student_param, teacher_param in zip(student_param_list, teacher_param_list):
+                    teacher_param.data.mul_(m)
+                    teacher_param.data.add_(student_param.data, alpha=1 - m)
 
 class DINOHead(nn.Module):
     def __init__(
@@ -1107,7 +1123,7 @@ class DINOLoss(nn.Module):
     def softmax_center_teacher(self, teacher_output, teacher_temp):
         self.apply_center_update()
         # teacher centering and sharpening
-        return F.softmax((teacher_output - self.center) / teacher_temp, dim=-1)
+        return nn.functional.softmax((teacher_output - self.center) / teacher_temp, dim=-1)
 
     @torch.no_grad()
     def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp, n_iterations=3):
@@ -1142,7 +1158,7 @@ class DINOLoss(nn.Module):
         # TODO: Use cross_entropy_distribution here
         total_loss = 0
         for s in student_output_list:
-            lsm = F.log_softmax(s / self.student_temp, dim=-1)
+            lsm = nn.functional.log_softmax(s / self.student_temp, dim=-1)
             for t in teacher_out_softmaxed_centered_list:
                 loss = torch.sum(t * lsm, dim=-1)
                 total_loss -= loss.mean()

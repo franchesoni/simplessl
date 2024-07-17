@@ -5,6 +5,7 @@ import json
 import subprocess
 import copy
 import sys
+from contextlib import suppress
 
 from simplejpeg import decode_jpeg
 from torch.utils.data import Dataset, DataLoader
@@ -120,6 +121,63 @@ def pseudo_random_augment(img_batch):
     # 5. apply solarize to the images that are not color jittered
     img_batch[-B // 5 :] = solarize(img_batch[-B // 5 :])
     return img_batch
+
+
+def fast_collate(batch):
+    return torch.from_numpy(np.array(batch))
+
+
+class PrefetchLoader:
+
+    def __init__(
+        self,
+        loader,
+        device,
+        img_dtype=torch.float32,
+    ):
+
+        self.loader = loader
+        self.device = device
+        self.img_dtype = img_dtype
+        self.is_cuda = torch.cuda.is_available() and device.type == "cuda"
+
+    def __iter__(self):
+        first = True
+        if self.is_cuda:
+            stream = torch.cuda.Stream()
+            stream_context = partial(torch.cuda.stream, stream=stream)
+        else:
+            stream = None
+            stream_context = suppress
+
+        for next_input in self.loader:
+
+            with stream_context():
+                next_input = next_input.to(device=self.device, non_blocking=True)
+                next_input = next_input.to(self.img_dtype)
+
+            if not first:
+                yield input
+            else:
+                first = False
+
+            if stream is not None:
+                torch.cuda.current_stream().wait_stream(stream)
+
+            input = next_input
+
+        yield input
+
+    def __len__(self):
+        return len(self.loader)
+
+    @property
+    def sampler(self):
+        return self.loader.sampler
+
+    @property
+    def dataset(self):
+        return self.loader.dataset
 
 
 ## TRAINING
@@ -266,6 +324,7 @@ def main(
                 },
                 f,
             )
+    device = torch.device(device)
 
     ######## DATA ########
     train_ds = ImageNetImageDataset(
@@ -274,12 +333,16 @@ def main(
     val_ds = ImageNetImageDataset(
         path_to_imagenet, transform=partial(center_crop_and_resize, size=image_size)
     )
-    train_dl = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        drop_last=True,
+    train_dl = PrefetchLoader(
+        DataLoader(
+            train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            drop_last=True,
+            collate_fn=fast_collate,
+        ),
+        device=device,
     )
     ####### MODEL ########
     teacher_backbone = vit_large(patch_size=14, num_register_tokens=4)
@@ -316,10 +379,8 @@ def main(
     st = time.time()
     while global_step < steps:
         for img_batch in train_dl:
-            # imgs is (B, 3, H, W)
-            img_batch = img_batch.to(device, non_blocking=True).permute(
-                0, 3, 1, 2
-            )  # go from uint8 numpy to float32 torch tensor B C H W
+            # img_batch is (B, H, W, 3)
+            img_batch = img_batch.permute(0, 3, 1, 2)  # (B 3 H W)
             img_batch = pseudo_random_augment(img_batch)
             img_batch = img_batch / 255 - 0.5  # normalize [-0.5, 0.5]
 

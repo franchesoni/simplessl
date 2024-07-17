@@ -13,6 +13,7 @@ import numpy as np
 import cv2
 import torch
 import schedulefree as sfoptim
+from PIL import Image
 
 
 from config import IMAGENET_PATH
@@ -39,14 +40,19 @@ class ImageNetImageDataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        try:
+        try:  # simplejpeg is fastest
             img = decode_jpeg(
                 self.image_paths[idx].read_bytes(), fastdct=True, fastupsample=True
             )
-        except Exception as e:
-            print(f"Error reading {self.image_paths[idx]}: {e}")
-            print("Returning a black image instead.")
-            return np.zeros((224, 224, 3), dtype=np.uint8)
+        except ValueError as e:
+            print(f"Error reading with simplejpeg", end="\r")
+            print("Trying with PIL...", end="\r")
+            try:  # if it doesn't work use PIL, decently fast
+                img = np.array(Image.open(self.image_paths[idx]).convert("RGB"))
+                print("Read with PIL!", end="\r")
+            except Exception as e:  # if PIL also doesn't work, report the image and return a black or a white image.
+                print(f"Error reading with simplejpeg and PIL {self.image_paths[idx]}: {e}. The image is probably corrupted, returning a plain image.")
+                return np.ones((224, 224, 3), dtype=np.uint8) * 255 * (idx % 2),  # return a white or black image
         img = self.transform(img)
         return img
 
@@ -135,10 +141,12 @@ def main(
     steps=1000,
     patches_student=8,
     patches_teacher=32,
+    teacher_momentum=0.994,
     lr=0.01,
     beta=0.9,
     weight_decay=0.0,
-    batch_size=32,
+    batch_size=256,
+    num_workers=48,
     image_size=224,
     device="cuda" if torch.cuda.is_available() else "cpu",
     seed=0,
@@ -172,7 +180,7 @@ def main(
         IMAGENET_PATH, transform=partial(center_crop_and_resize, size=image_size)
     )
     train_dl = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True, num_workers=batch_size
+        train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True
     )
     ####### MODEL ########
     teacher_backbone = vit_small(patch_size=14, num_register_tokens=4)
@@ -211,7 +219,7 @@ def main(
             )  # go from uint8 numpy to float32 torch tensor B C H W
             # now we need to create the masks that will leave vs visible patches for the student and vt for the teacher, and the teacher sees all those of the student.
             masks_student, masks_teacher = create_random_masks(
-                B=batch_size,
+                B=imgs.shape[0],
                 L=256,
                 V1=patches_student,
                 V2=patches_teacher,
@@ -238,6 +246,7 @@ def main(
             optimizer.zero_grad(set_to_none=True)
             total_loss.backward()
             optimizer.step()
+            models.update_teacher(teacher_momentum)
 
             writer.add_scalar("train/total_loss", total_loss.item(), global_step)
             print(
@@ -251,6 +260,10 @@ def main(
             global_step += 1
             if global_step >= steps:
                 break
+
+    # log and checkpoint
+    with open(writer.get_logdir() / "done.txt", "w") as f:
+        f.write("done")
 
 
 if __name__ == "__main__":

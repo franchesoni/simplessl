@@ -409,7 +409,7 @@ def main(
         for img_batch in train_dl:
             # img_batch is (B, H, W, 3)
             img_batch = img_batch.permute(0, 3, 1, 2)  # (B 3 H W)
-            img_batch = random_augment(img_batch, vis=True)
+            img_batch = random_augment(img_batch, vis=False)
             img_batch = img_batch / 255 - 0.5  # normalize [-0.5, 0.5]
 
             # now we need to create the masks that will leave vs visible patches for the student and vt for the teacher, and the teacher sees all those of the student.

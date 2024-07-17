@@ -15,6 +15,7 @@ import torch
 import schedulefree as sfoptim
 from PIL import Image
 from sklearn.decomposition import PCA
+import torchvision.transforms.v2 as transforms
 
 
 from dinov2 import vit_small, vit_large, DINOHead, TeacherStudent, DINOLoss
@@ -94,7 +95,31 @@ def center_crop_and_resize(img, size=224):
     return img
 
 
-## MODEL
+jitter, grayscale, blur, solarize = (
+    transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1),
+    transforms.Grayscale(),
+    transforms.GaussianBlur(kernel_size=9),
+    transforms.RandomSolarize(threshold=128),
+)
+
+
+def pseudo_random_augment(img_batch):
+    """
+    Random augmentations following DINOv2. Flip with 0.5 prob, color jittering with 0.8 prob, grayscale with 0.2 prob, blur with 0.5, solarize with 0.2.
+    Because we have a batch, we favor pseudo-random augmentations. We will apply augmentations to the proportion of the images given by the probabilities.
+    """
+    B = img_batch.shape[0]
+    # 1. we flip the first half of the batch, as the batch is random it's a random flip
+    img_batch[: B // 2] = torch.flip(img_batch[: B // 2], dims=[3])  # last half
+    # 2. apply color jitter to 80% of the images, half of them are flipped. Ignore which images are flipped
+    img_batch[: (8 * B) // 10] = jitter(img_batch[: (8 * B) // 10])  # first 80%
+    # 3. apply grayscale to 20% of the images, Ignore which images are flipped or jittered
+    img_batch[: B // 5] = grayscale(img_batch[: B // 5])
+    # 4. apply gaussian blur to half of the images, all jittered, all flipped, few grayscale (10%-60%)
+    img_batch[B // 10 : (6 * B) // 10] = blur(img_batch[B // 10 : (6 * B) // 10])
+    # 5. apply solarize to the images that are not color jittered
+    img_batch[-B // 5 :] = solarize(img_batch[-B // 5 :])
+    return img_batch
 
 
 ## TRAINING
@@ -290,18 +315,17 @@ def main(
     global_step = 0
     st = time.time()
     while global_step < steps:
-        for imgs in train_dl:
+        for img_batch in train_dl:
             # imgs is (B, 3, H, W)
-            imgs = (imgs.to(device, non_blocking=True) / 255 - 0.5).permute(
+            img_batch = img_batch.to(device, non_blocking=True).permute(
                 0, 3, 1, 2
             )  # go from uint8 numpy to float32 torch tensor B C H W
-            # random augmentation
-            B = imgs.shape[0]
-            flip = torch.rand(B) < 0.5
+            img_batch = pseudo_random_augment(img_batch)
+            img_batch = img_batch / 255 - 0.5  # normalize [-0.5, 0.5]
 
             # now we need to create the masks that will leave vs visible patches for the student and vt for the teacher, and the teacher sees all those of the student.
             masks_student, masks_teacher = create_random_masks(
-                B=imgs.shape[0],
+                B=img_batch.shape[0],
                 L=256,
                 V1=patches_student,
                 V2=patches_teacher,
@@ -309,14 +333,14 @@ def main(
             )
             # let us use simple dino loss
             with torch.no_grad():
-                out_teacher = models.teacher.backbone(imgs, masks_teacher)
+                out_teacher = models.teacher.backbone(img_batch, masks_teacher)
                 teacher_cls_tokens = out_teacher["x_norm_clstoken"]
                 teacher_cls_tokens_after_head = models.teacher.head(teacher_cls_tokens)
                 teacher_dino_softmaxed_centered = dino_loss.softmax_center_teacher(
                     teacher_cls_tokens_after_head, teacher_temp=0.05
                 )
                 dino_loss.update_center(teacher_cls_tokens_after_head)
-            out_student = student_backbone(imgs, masks_student)
+            out_student = student_backbone(img_batch, masks_student)
             student_cls_tokens = out_student["x_norm_clstoken"]
             student_cls_tokens_after_head = models.student.head(student_cls_tokens)
             dino_global_loss = dino_loss(

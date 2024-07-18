@@ -898,6 +898,7 @@ class VisionTransformer(nn.Module):
     ):  # modified (masking behavior more similar to MAE now)
         # if x is (B, 3, H, W), then the embedding before the extra tokens is (B, L, D), where (L) depends on the size of the image and the patch size. L = (H/patch_size) * (W/patch_size).
         # Then masks should be a boolean tensor of shape (B, L) that indicates with a True those values that should be kept. The same number of tokens are kept for each entry in the batch.
+        # The output is [cls, reg1, reg2, reg3, reg4, patch1, ..., patchL] unless masked, in which case the masked patch tokens are removed.
         B, nc, w, h = x.shape
         x = self.patch_embed(x)  # (B, L, D)
         B, L, D = x.shape
@@ -931,6 +932,7 @@ class VisionTransformer(nn.Module):
         return x
 
     def forward_features_list(self, x_list, masks_list):
+        raise NotImplementedError("We don't use this anymore, token extraction and mask behavior changed")  # modified
         x = [
             self.prepare_tokens_with_masks(x, masks)
             for x, masks in zip(x_list, masks_list)
@@ -953,12 +955,7 @@ class VisionTransformer(nn.Module):
             )
         return output
 
-    def forward_features(self, x, masks=None):
-        if isinstance(x, list):
-            return self.forward_features_list(x, masks)
-
-        x = self.prepare_tokens_with_masks(x, masks)
-
+    def forward_tokens(self, x):
         for blk in self.blocks:
             x = blk(x)
 
@@ -968,8 +965,13 @@ class VisionTransformer(nn.Module):
             "x_norm_regtokens": x_norm[:, 1 : self.num_register_tokens + 1],
             "x_norm_patchtokens": x_norm[:, self.num_register_tokens + 1 :],
             "x_prenorm": x,
-            "masks": masks,
         }
+
+
+    def forward_features(self, x, masks=None):
+        x = self.prepare_tokens_with_masks(x, masks)
+        return self.forward_tokens(x) | {"masks": masks}
+
 
     def _get_intermediate_layers_not_chunked(self, x, n=1):
         x = self.prepare_tokens_with_masks(x)

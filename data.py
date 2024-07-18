@@ -1,4 +1,5 @@
 from pathlib import Path
+from functools import partial
 from contextlib import suppress
 
 from PIL import Image
@@ -87,7 +88,7 @@ def center_crop_and_resize(img, size=224):
 grayscale, blur, solarize = (
     transforms.Grayscale(),
     transforms.GaussianBlur(kernel_size=9),
-    transforms.RandomSolarize(threshold=0.5),
+    transforms.RandomSolarize(p=1., threshold=0.5),
 )
 
 
@@ -96,6 +97,8 @@ def random_augment(img_batch, vis=False):
     Random augmentations following DINOv2. Flip with 0.5 prob, color jittering with 0.8 prob, grayscale with 0.2 prob, blur with 0.5, solarize with 0.2.
     Because we have a batch, we favor pseudo-random augmentations. We will apply augmentations to the proportion of the images given by the probabilities.
     """
+    assert img_batch.ndim == 4, "img_batch should be (B, C, H, W)"
+    assert img_batch.max() > 1. and img_batch.max() < 256. and img_batch.min() >= 0, "img_batch should be in [0, 255.]"
     if vis:
         for i in range(10):
             Image.fromarray(
@@ -129,7 +132,7 @@ def random_augment(img_batch, vis=False):
     # 4. apply gaussian blur to half of the images, all jittered, all flipped, few grayscale (10%-60%)
     img_batch[B // 10 : (6 * B) // 10] = blur(img_batch[B // 10 : (6 * B) // 10])
     # 5. apply solarize to the images that are not color jittered
-    img_batch[-B // 5 :] = solarize(img_batch[-B // 5 :])
+    img_batch[-B // 5 :] = solarize(img_batch[-B // 5 :] / 255) * 255
     if vis:
         for i in range(10):
             Image.fromarray(

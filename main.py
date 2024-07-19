@@ -8,7 +8,7 @@ from PIL import Image
 from sklearn.decomposition import PCA
 
 
-from dinov2 import vit_small, vit_large, DINOHead, TeacherStudent, DINOLoss
+from dinov2code import vit_small, vit_large, DINOHead, TeacherStudent, DINOLoss
 from trainer import train
 
 

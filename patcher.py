@@ -217,7 +217,7 @@ def validate(
                 (((mixed_imgs + 0.5) * 255).permute(1, 2, 0).cpu().numpy()).astype(
                     np.uint8
                 )
-            ).save(Path(img_logdir) / f"{i}_mixed.png")
+            ).save(Path(img_logdir) / f"{i}_mixed_step_{global_step}.png")
             # for visualization, save the reconstructed images
             unmixed_rgb = unmix_tokens(mixed_rgb, rasterindices)
             reconstructed_imgs = patches_to_image(
@@ -228,7 +228,7 @@ def validate(
                 (
                     ((reconstructed_imgs + 0.5) * 255).permute(1, 2, 0).cpu().numpy()
                 ).astype(np.uint8)
-            ).save(Path(img_logdir) / f"{i}_reconstructed.png")
+            ).save(Path(img_logdir) / f"{i}_reconstructed_step_{global_step}.png")
         # now compute the loss
         unmixed_tokens = unmix_tokens(tokens, indices)
         losses.append(loss(unmixed_tokens).item())

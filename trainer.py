@@ -55,6 +55,8 @@ def train(
     dev=False,
 ):
     ####### SET UP (logging) ########
+    if (not dev) and ((steps - 1)  % val_every != 0):
+        raise ValueError("validate_every does not evaluate the last step")
     seed_everything(seed)
     hparams = copy.deepcopy(locals())  # these are roughly the args passed to main
     command = " ".join(sys.argv)

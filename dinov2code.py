@@ -1054,7 +1054,7 @@ def vit_small(patch_size=16, num_register_tokens=0, **kwargs):
         depth=12,
         num_heads=6,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=MemEffAttention),
+        block_fn=partial(NestedTensorBlock, attn_class=MemEffAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -1068,7 +1068,7 @@ def vit_base(patch_size=16, num_register_tokens=0, **kwargs):
         depth=12,
         num_heads=12,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=MemEffAttention),
+        block_fn=partial(NestedTensorBlock, attn_class=MemEffAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -1082,7 +1082,7 @@ def vit_large(patch_size=16, num_register_tokens=0, **kwargs):
         depth=24,
         num_heads=16,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=MemEffAttention),
+        block_fn=partial(NestedTensorBlock, attn_class=MemEffAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -1099,7 +1099,7 @@ def vit_giant2(patch_size=16, num_register_tokens=0, **kwargs):
         depth=40,
         num_heads=24,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=MemEffAttention),
+        block_fn=partial(NestedTensorBlock, attn_class=MemEffAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )

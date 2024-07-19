@@ -39,7 +39,7 @@ def init_model_and_loss(patch_size, out_dim):
 
 def train_step(
     img_batch,
-    models,
+    model,
     loss_fn,
     optimizer,
     image_size,
@@ -59,16 +59,16 @@ def train_step(
     )
     # let us use simple dino loss
     with torch.no_grad():
-        out_teacher = models.teacher.backbone(img_batch, masks_teacher)
+        out_teacher = model.teacher.backbone(img_batch, masks_teacher)
         teacher_cls_tokens = out_teacher["x_norm_clstoken"]
-        teacher_cls_tokens_after_head = models.teacher.head(teacher_cls_tokens)
+        teacher_cls_tokens_after_head = model.teacher.head(teacher_cls_tokens)
         teacher_dino_softmaxed_centered = loss_fn.softmax_center_teacher(
             teacher_cls_tokens_after_head, teacher_temp=0.05
         )
         loss_fn.update_center(teacher_cls_tokens_after_head)
-    out_student = models.student.backbone(img_batch, masks_student)
+    out_student = model.student.backbone(img_batch, masks_student)
     student_cls_tokens = out_student["x_norm_clstoken"]
-    student_cls_tokens_after_head = models.student.head(student_cls_tokens)
+    student_cls_tokens_after_head = model.student.head(student_cls_tokens)
     dino_global_loss = loss_fn(
         student_output_list=[student_cls_tokens_after_head],
         teacher_out_softmaxed_centered_list=[teacher_dino_softmaxed_centered],
@@ -77,7 +77,7 @@ def train_step(
     optimizer.zero_grad(set_to_none=True)
     total_loss.backward()
     optimizer.step()
-    models.update_teacher(teacher_momentum)
+    model.update_teacher(teacher_momentum)
     return {"total_loss": total_loss}
 
 
@@ -109,7 +109,7 @@ def pct_norm(x, p=1):
 
 
 def validate(
-    val_ds, models, device, global_step, img_logdir, writer, n_imgs=8, search_among=128
+    val_ds, model, device, global_step, img_logdir, writer, n_imgs=8, search_among=128
 ):
     assert search_among % n_imgs == 0, "search_among must be divisible by n_imgs"
     generator = torch.Generator()  # always sample the same images
@@ -121,7 +121,7 @@ def validate(
     library_feats, library_imgs = [], []
     for i, raw_imgs in enumerate(dl):
         imgs = (raw_imgs.to(device) / 255 - 0.5).permute(0, 3, 1, 2)
-        out = models.teacher.backbone(imgs)
+        out = model.teacher.backbone(imgs)
         if i == 0:
             # First do a pca of the embeddings for each patch and save hte color images
             pca = PCA(n_components=3)
@@ -167,14 +167,14 @@ def validate(
     # compute RankMe
     print("Computing RankMe...", end="\r")
     singular_values = torch.linalg.svdvals(
-        models.teacher.head.last_layer.weight  # (out_dim, in_dim)
+        model.teacher.head.last_layer.weight  # (out_dim, in_dim)
     )
     pks = singular_values / torch.linalg.norm(singular_values, ord=1) + 1e-7
     rankme = torch.exp(-torch.sum(pks * torch.log(pks)))
     if writer:
         writer.add_scalar("train/rankme", rankme.item(), global_step)
         # save teacher
-        teacher_state_dict = models.teacher.state_dict()
+        teacher_state_dict = model.teacher.state_dict()
         torch.save(
             teacher_state_dict,
             Path(writer.get_logdir()) / "last_validated_teacher.pth",

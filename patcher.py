@@ -489,8 +489,11 @@ next:
 - Train a vitL network from scratch.
 - Visualize PCA
 - Visualize retrieval 
+- Retrain a vitL network from scratch.
+- Use SING optimizer to see if we get rid of the jumps in the loss
 - Make patch size flexible
 - Train a vitL network with patches of 7 and bigger batch size
+
 """
 if __name__ == "__main__":
     from fire import Fire

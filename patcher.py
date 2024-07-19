@@ -239,6 +239,8 @@ def validate(
         print(f"Mean loss at batch {i+1}/{n_batches}:", np.mean(losses), end="\r")
     if writer:
         writer.add_scalar("val/mean_loss", np.mean(losses), global_step)
+        # save network
+        torch.save(model.state_dict, Path(writer.get_logdir()) / f"last_validated_model.pth")
     print("Mean validation loss:", np.mean(losses))
     return np.mean(losses)
 
@@ -481,8 +483,8 @@ next:
 - [DONE] Evaluate the random vit and register results.
 - [DONE] Evaluate the rgb and register results.
 - [DONE] Evaluate dinov2reg and register results.
-- Train a linear layer on top of dinov2reg and save the checkpoint.
-- Evaluate the lienar layer on top of dinov2reg and register results.
+- [DONE] Train a linear layer on top of dinov2reg and save the checkpoint.
+- [DONE] Evaluate the lienar layer on top of dinov2reg and register results.
 - Train a network from scratch.
 """
 if __name__ == "__main__":

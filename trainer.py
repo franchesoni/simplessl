@@ -49,7 +49,7 @@ def train(
     batch_size=256,
     num_workers=48,
     image_size=224,
-    device="cuda" if torch.cuda.is_available() else "cpu",
+    device="cuda",
     seed=0,
     tag="",
     dev=False,
@@ -76,6 +76,8 @@ def train(
                 },
                 f,
             )
+    if not torch.cuda.is_available() and "cuda" in device:
+        device = "cpu"
     device = torch.device(device)
 
     ######## DATA ########

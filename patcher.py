@@ -14,16 +14,26 @@ from trainer import train, seed_everything, pct_norm
 
 
 
-def mix_tokens(tokens, indices=None, seed=None):
+def mix_tokens(tokens, indices=None, seed=None, effective_batch_size=None):
+    """
+    effective_batch_size is the number of images mixed together. If None, it's the same as the batch size, i.e. all images are mixed.
+    """
     # we need to return a new batch tensor that has the same number of elements B but with the patch tokens mixed. The first 5 tokens should be always the same
     B, L, D = tokens.shape
     assert ((L == 261) and torch.allclose(tokens[0, :5], tokens[-1, :5])) or (
         L == 256
     ), "Number of tokens should be 256 or 261. If 261, the first 5 tokens should be the same for all images in the batch, as they are cls and 4 reg tokens."
+    if effective_batch_size is None:
+        effective_batch_size = B
+    else:
+        assert (B % effective_batch_size == 0), "Batch size must be divisible by effective batch size"
     if indices is None:
         if seed is not None:
+            torch.manual_seed(seed)
             torch.cuda.manual_seed(seed)
         noise = torch.rand(B, 256, device=tokens.device)
+        for offset in range(B // effective_batch_size):
+            noise[offset * effective_batch_size : (offset + 1) * effective_batch_size] += offset 
         if L == 261:
             noise = torch.cat(
                 (
@@ -359,6 +369,7 @@ def train_step(
     loss_fn,
     optimizer,
     scheduler,
+    effective_batch_size,
 ):
     assert (
         -0.51 <= img_batch.min() and img_batch.max() <= 0.51
@@ -386,6 +397,7 @@ def main(
     steps=10000,
     val_every=1000,
     batch_size=4,
+    effective_batch_size=4,
     val_batch_size=4,
     num_workers=0,
     image_size=224,
@@ -406,7 +418,7 @@ def main(
         train_step_fn = dummy_train_step
         steps = 1
     else:
-        train_step_fn = train_step
+        train_step_fn = partial(train_step, effective_batch_size=effective_batch_size)
     validate_fn = partial(
         validate,
         n_batches=n_val_batches,

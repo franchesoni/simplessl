@@ -8,7 +8,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from scipy.optimize import linear_sum_assignment
 
-from dinov2code import vit_small
+from dinov2code import vit_small, vit_large
 from trainer import train, seed_everything
 
 
@@ -295,7 +295,7 @@ class FrozenDinoLinear(torch.nn.Module):
 
 
 def init_model_and_loss(patch_size, model_name="vits"):
-    assert model_name in ["vits", "rgb", "dinov2regs", "frozendinov2regs_linear"]
+    assert model_name in ["vits", "vitl", "rgb", "dinov2regs", "frozendinov2regs_linear"]
     if model_name in ["vits", "dinov2regs", "frozendinov2regs_linear"]:
         model = vit_small(
             patch_size,
@@ -315,6 +315,18 @@ def init_model_and_loss(patch_size, model_name="vits"):
             )
     elif model_name == "rgb":
         model = RGBModel(patch_size)
+    elif model_name == "vitl":
+        model = vit_large(
+            patch_size,
+            init_values=1.0,
+            img_size=518,
+            block_chunks=0,
+            num_register_tokens=4,
+            interpolate_antialias=True,
+            interpolate_offset=0.0,
+            drop_path_rate=0.2,
+            drop_path_uniform=True,
+        )
     else:
         raise NotImplementedError
 
@@ -485,12 +497,12 @@ next:
 - [DONE] Evaluate dinov2reg and register results.
 - [DONE] Train a linear layer on top of dinov2reg and save the checkpoint.
 - [DONE] Evaluate the lienar layer on top of dinov2reg and register results.
-- Train a vitS network from scratch.
-- Train a vitL network from scratch.
+- [DONE] Train a vitS network from scratch. <- the loss is okish, not much better than dino+linear
+- [DONE] Train a vitL network from scratch. <- didn't work, loss jumped up, need sing
+- Use SING optimizer to see if we get rid of the jumps in the loss
 - Visualize PCA
 - Visualize retrieval 
 - Retrain a vitL network from scratch.
-- Use SING optimizer to see if we get rid of the jumps in the loss
 - Make patch size flexible
 - Train a vitL network with patches of 7 and bigger batch size
 
@@ -518,5 +530,8 @@ if __name__ == "__main__":
 # Mean validation loss: 0.17905898584285754285757+01 step/s|  GPU mem 1.97 GB  (2k gradient descent steps)
 # Mean validation loss: 0.17991738574346527346527+01 step/s|  GPU mem 1.97 GB  (8k gradient descent steps)
 
-# 
+# the following vits worked ok:
 # python patcher.py --n_val_batches=256 --tag="vits" --steps=10000 --val_every=2000 --batch_size=32 --num_workers=64 --model_name=vits --device="cuda:1" --dev
+
+# the following vitl had a jump in the loss and never recovered
+#  python patcher.py --n_val_batches=256 --tag="vitl" --steps=20001 --val_every=2000 --batch_size=32 --num_workers=64 --model_name=vitl --device="cuda:1"

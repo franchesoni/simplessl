@@ -13,6 +13,7 @@ import numpy as np
 import schedulefree as sfoptim
 
 from data import ImageNetImageDataset, RandomResizedCropAndInterpolation, center_crop_and_resize, fast_collate, PrefetchLoader, random_augment
+from sing import SING
 
 def seed_everything(seed):
     np.random.seed(seed)
@@ -53,6 +54,7 @@ def train(
     seed=0,
     tag="",
     dev=False,
+    sing=False,
 ):
     ####### SET UP (logging) ########
     if (not dev) and ((steps - 1)  % val_every != 0):
@@ -101,20 +103,31 @@ def train(
         device=device,
     )
     ####### MODEL ########
-    models, loss_fn = model_loss_init_fn()
-    models = models.to(device)
+    model, loss_fn = model_loss_init_fn()
+    model = model.to(device)
     loss_fn = loss_fn.to(device) if hasattr(loss_fn, "to") else loss_fn
 
 
     ######## OPTIMIZER ########
-    optimizer = sfoptim.AdamWScheduleFree(
-        models.parameters(),
-        lr=lr,
-        warmup_steps=steps // 20,
-        betas=(beta, 0.999),
-        weight_decay=weight_decay,
-    )
-    optimizer.train()
+    if sing:
+        optimizer = SING(model.parameters(), lr=lr/10, weight_decay=weight_decay, betas=(beta, 0.999))
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=lr,
+            total_steps=steps + 1,
+            pct_start=0.05,
+            final_div_factor=1e12,
+        )
+    else:
+        optimizer = sfoptim.AdamWScheduleFree(
+            model.parameters(),
+            lr=lr,
+            warmup_steps=steps // 20,
+            betas=(beta, 0.999),
+            weight_decay=weight_decay,
+        )
+        optimizer.train()
+        scheduler = None
 
     ####### LOOP #########
     global_step = 0
@@ -126,7 +139,7 @@ def train(
             img_batch = random_augment(img_batch, vis=False)
             img_batch = img_batch / 255 - 0.5  # normalize [-0.5, 0.5]
 
-            losses = train_step_fn(img_batch, models, loss_fn, optimizer)
+            losses = train_step_fn(img_batch, model, loss_fn, optimizer, scheduler)
 
             if writer:
                 for loss_name in losses:
@@ -144,7 +157,7 @@ def train(
                 with torch.no_grad():
                     validate_fn(
                         val_ds,
-                        models,
+                        model,
                         device,
                         global_step,
                         img_logdir,

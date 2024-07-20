@@ -343,6 +343,7 @@ def train_step(
     model,
     loss_fn,
     optimizer,
+    scheduler,
 ):
     assert (
         -0.51 <= img_batch.min() and img_batch.max() <= 0.51
@@ -357,6 +358,8 @@ def train_step(
     optimizer.zero_grad(set_to_none=True)
     total_loss.backward()
     optimizer.step()
+    if scheduler is not None:
+        scheduler.step()
     return {"total_loss": total_loss}
 
 

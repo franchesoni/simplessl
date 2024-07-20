@@ -42,6 +42,7 @@ def train_step(
     model,
     loss_fn,
     optimizer,
+    scheduler,
     image_size,
     patch_size,
     device,
@@ -77,6 +78,8 @@ def train_step(
     optimizer.zero_grad(set_to_none=True)
     total_loss.backward()
     optimizer.step()
+    if scheduler is not None:
+        scheduler.step()
     model.update_teacher(teacher_momentum)
     return {"total_loss": total_loss}
 

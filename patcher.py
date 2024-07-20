@@ -257,9 +257,9 @@ def validate(
                 unmixed_tokens.reshape(B * L, D).cpu().numpy()
             ).reshape(B, L, 3)
             pca_features = pct_norm(pca_features).reshape(B, int(L ** (1 / 2)), int(L ** (1 / 2)), 3)
-            pca_features = torch.concatenate(list(pca_features), dim=1)
+            pca_features = np.concatenate(list(pca_features), axis=1)
             raw_imgs = torch.concatenate(list(((img_batch+0.5)*255).permute(0, 2, 3, 1)), dim=2)
-            Image.fromarray((pca_features*255).cpu().numpy().astype(np.uint8)).save(img_logdir / f"{i}_pca_step_{global_step}.png")
+            Image.fromarray((pca_features*255).astype(np.uint8)).save(img_logdir / f"{i}_pca_step_{global_step}.png")
             Image.fromarray(raw_imgs.cpu().numpy().astype(np.uint8)).save(img_logdir / f"{i}_raw_step_{global_step}.png")
 
     if writer:
@@ -376,7 +376,7 @@ def train_step(
     ), f"Images should be normalized to [-0.5, 0.5] but are in [{img_batch.min()}, {img_batch.max()}]"
     # get the tokens, mix them, forward them, unmix them, compute loss
     tokens = model.prepare_tokens_with_masks(img_batch, masks=None)
-    tokens, indices = mix_tokens(tokens)
+    tokens, indices = mix_tokens(tokens, effective_batch_size=effective_batch_size)
     tokens = model.forward_tokens(tokens)["x_norm_patchtokens"]
     unmixed_tokens = unmix_tokens(tokens, indices)
     total_loss = loss_fn(unmixed_tokens)

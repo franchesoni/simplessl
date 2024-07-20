@@ -9,7 +9,7 @@ from sklearn.decomposition import PCA
 
 
 from dinov2code import vit_small, vit_large, DINOHead, TeacherStudent, DINOLoss
-from trainer import train
+from trainer import train, pct_norm
 
 
 def init_model_and_loss(patch_size, out_dim):
@@ -105,10 +105,6 @@ def create_random_masks(B, L, V1, V2, device):
     masks2 = shuffled_indices < V2
     return masks1, masks2
 
-
-def pct_norm(x, p=1):
-    newmin, newmax = np.percentile(x, p), np.percentile(x, 100 - p)
-    return np.clip((x - newmin) / (newmax - newmin), 0, 1)
 
 
 def validate(

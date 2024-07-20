@@ -15,6 +15,12 @@ import schedulefree as sfoptim
 from data import ImageNetImageDataset, RandomResizedCropAndInterpolation, center_crop_and_resize, fast_collate, PrefetchLoader, random_augment
 from sing import SING
 
+def pct_norm(x, p=1):
+    newmin, newmax = np.percentile(x, p), np.percentile(x, 100 - p)
+    return np.clip((x - newmin) / (newmax - newmin), 0, 1)
+
+
+
 def seed_everything(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)

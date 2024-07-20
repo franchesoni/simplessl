@@ -7,9 +7,11 @@ from PIL import Image
 import numpy as np
 from torch.utils.data import DataLoader
 from scipy.optimize import linear_sum_assignment
+from sklearn.decomposition import PCA
 
 from dinov2code import vit_small, vit_large
-from trainer import train, seed_everything
+from trainer import train, seed_everything, pct_norm
+
 
 
 def mix_tokens(tokens, indices=None, seed=None):
@@ -206,6 +208,15 @@ def validate(
         _, rasterindices = raster_reconstruction(
             tokens
         )  # gives the indices given by raster similarity
+        # now compute the loss
+        unmixed_tokens = unmix_tokens(tokens, indices)
+        losses.append(loss(unmixed_tokens).item())
+        if writer:
+            writer.add_histogram(
+                tag="val/loss", values=np.array(losses), global_step=global_step
+            )
+        print(f"Mean loss at batch {i+1}/{n_batches}:", np.mean(losses), end="\r")
+
         if i < n_show:
             # for visualization, save the mixed images
             mixed_rgb, _ = mix_tokens(rgb_tokens, indices)
@@ -229,14 +240,18 @@ def validate(
                     ((reconstructed_imgs + 0.5) * 255).permute(1, 2, 0).cpu().numpy()
                 ).astype(np.uint8)
             ).save(Path(img_logdir) / f"{i}_reconstructed_step_{global_step}.png")
-        # now compute the loss
-        unmixed_tokens = unmix_tokens(tokens, indices)
-        losses.append(loss(unmixed_tokens).item())
-        if writer:
-            writer.add_histogram(
-                tag="val/loss", values=np.array(losses), global_step=global_step
-            )
-        print(f"Mean loss at batch {i+1}/{n_batches}:", np.mean(losses), end="\r")
+            # do pca
+            pca = PCA(n_components=3)
+            B, L, D = unmixed_tokens.shape
+            pca_features = pca.fit_transform(
+                unmixed_tokens.reshape(B * L, D).cpu().numpy()
+            ).reshape(B, L, 3)
+            pca_features = pct_norm(pca_features).reshape(B, int(L ** (1 / 2)), int(L ** (1 / 2)), 3)
+            pca_features = torch.concatenate(list(pca_features), dim=1)
+            raw_imgs = torch.concatenate(list(((img_batch+0.5)*255).permute(0, 2, 3, 1)), dim=2)
+            Image.fromarray((pca_features*255).cpu().numpy().astype(np.uint8)).save(img_logdir / f"{i}_pca_step_{global_step}.png")
+            Image.fromarray(raw_imgs.cpu().numpy().astype(np.uint8)).save(img_logdir / f"{i}_raw_step_{global_step}.png")
+
     if writer:
         writer.add_scalar("val/mean_loss", np.mean(losses), global_step)
         # save network
@@ -502,7 +517,7 @@ next:
 - [DONE] Evaluate the lienar layer on top of dinov2reg and register results.
 - [DONE] Train a vitS network from scratch. <- the loss is okish, not much better than dino+linear
 - [DONE] Train a vitL network from scratch. <- didn't work, loss jumped up, need sing
-- Use SING optimizer to see if we get rid of the jumps in the loss
+- [DONE] Use SING optimizer to see if we get rid of the jumps in the loss
 - Visualize PCA
 - Visualize retrieval 
 - Retrain a vitL network from scratch.

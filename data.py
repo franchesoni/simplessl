@@ -19,7 +19,12 @@ class ImageNetImageDataset(Dataset):
         if Path("image_paths_cache.npy").exists():
             self.image_paths = np.load("image_paths_cache.npy", allow_pickle=True)
         else:
-            self.image_paths = np.array(sorted(self.path.glob("*.JPEG")))
+            self.image_paths = []
+            for ext in ['jpg', 'jpeg', 'JPG', 'JPEG']:
+                self.image_paths += list(self.path.glob(f"**/*.{ext}")) 
+                if len(self.image_paths) > 100000:  # assume we found them all
+                    break
+            self.image_paths = np.array(sorted(self.image_paths))
             np.save("image_paths_cache.npy", self.image_paths)
         print("Done loading image paths.", end="\r")
         if transform is None:

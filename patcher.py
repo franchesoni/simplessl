@@ -157,11 +157,12 @@ def loss(unmixed_tokens):
     # the loss is MSE(KTK - I) where K are the D, BL tokens and I is a block diagonal with ones for each batch
     # we first compute the term for the block diagonal and then compute the rest
     B, L, D = unmixed_tokens.shape
+    unmixed_tokens = torch.nn.functional.normalize(unmixed_tokens, p=2, dim=-1)
     batched_cosine_similarity = torch.bmm(unmixed_tokens, unmixed_tokens.transpose(1, 2))
-    loss = torch.sum((batched_cosine_similarity - 1)**2) - torch.sum(batched_cosine_similarity**2) 
+    loss = torch.sum(torch.abs(batched_cosine_similarity - 1)) - torch.sum(torch.abs(batched_cosine_similarity)) 
     unmixed_tokens = unmixed_tokens.view(-1, D)
-    loss += torch.sum(torch.matmul(unmixed_tokens, unmixed_tokens.T)**2)  # (BL, BL)
-    return loss / (B * L) ** 2
+    loss += torch.sum(torch.abs(torch.matmul(unmixed_tokens, unmixed_tokens.T)))  # (BL, BL)
+    return loss / ((B * L) ** 2)
 
 
 def validate(

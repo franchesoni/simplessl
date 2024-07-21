@@ -16,13 +16,13 @@ from trainer import train, seed_everything, pct_norm
 
 def mix_tokens(tokens, indices=None, seed=None, effective_batch_size=None):
     """
-    effective_batch_size is the number of images mixed together. If None, it's the same as the batch size, i.e. all images are mixed.
+    Takes a tokens tensor of shape (B,L,D) and for each l in L, it will shuffle across the batch dimension.
+    It's supposed to be reproducible given same shape and seed.
+    It returns the indices used to shuffle the tokens.
+    effective_batch_size is the number of batch elements mixed together. If None, it's the same as the batch size, i.e. all elements in the batch are mixed.
     """
     # we need to return a new batch tensor that has the same number of elements B but with the patch tokens mixed. The first 5 tokens should be always the same
     B, L, D = tokens.shape
-    assert ((L == 261) and torch.allclose(tokens[0, :5], tokens[-1, :5])) or (
-        L == 256
-    ), "Number of tokens should be 256 or 261. If 261, the first 5 tokens should be the same for all images in the batch, as they are cls and 4 reg tokens."
     if effective_batch_size is None:
         effective_batch_size = B
     else:
@@ -31,22 +31,14 @@ def mix_tokens(tokens, indices=None, seed=None, effective_batch_size=None):
         if seed is not None:
             torch.manual_seed(seed)
             torch.cuda.manual_seed(seed)
-        noise = torch.rand(B, 256, device=tokens.device)
+        noise = torch.rand(B, L, device=tokens.device)
         for offset in range(B // effective_batch_size):
             noise[offset * effective_batch_size : (offset + 1) * effective_batch_size] += offset 
-        if L == 261:
-            noise = torch.cat(
-                (
-                    torch.arange(B, device=tokens.device).unsqueeze(1).expand(B, 5),
-                    noise,
-                ),
-                dim=1,
-            )
         indices = torch.argsort(
             noise, dim=0
         )  # (B, 256), random indices that reorder patches for a given L
-    elif indices.shape[1] > L:
-        indices = indices[:, indices.shape[1] - L :]  # in case the indices are too long
+    elif indices.shape[1] != L:
+        raise ValueError("Indices should have the same number of tokens as the tokens tensor")
     return (
         torch.gather(tokens, dim=0, index=indices.unsqueeze(2).expand(B, L, D)),
         indices,
@@ -55,12 +47,10 @@ def mix_tokens(tokens, indices=None, seed=None, effective_batch_size=None):
 
 def unmix_tokens(mixed_tokens, indices):
     B, L, D = mixed_tokens.shape
+    assert L == indices.shape[1], "Indices should have the same number of tokens as the tokens tensor but got {} and {}".format(L, indices.shape[1])
 
     # Create a tensor of indices to sort back to the original order
     unshuffle_indices = torch.argsort(indices, dim=0)
-    unshuffle_indices = unshuffle_indices[
-        :, unshuffle_indices.shape[1] - L :
-    ]  # in case the indices are too long
 
     # Use these indices to gather the original tokens
     original_tokens = torch.gather(
@@ -90,18 +80,15 @@ def image_to_patches(image, patch_size):
 
 def patches_to_image(patches, patch_size, H, W):
     B, L, D = patches.shape
-    C = D // (patch_size * patch_size)
+    assert D == 3 * patch_size * patch_size, f"We expect rgb_tokens with D = {3 * patch_size * patch_size} but found D = {D}"
 
     # Transpose back to (B, D, L)
     patches = patches.transpose(1, 2)
 
-    # Reshape to match F.fold input shape
-    patches = patches.view(B, C * patch_size * patch_size, L)
-
     # Use fold to reconstruct the image
     image = F.fold(
         patches, output_size=(H, W), kernel_size=patch_size, stride=patch_size
-    )
+    )  # (B, C, H, W)
 
     return image
 
@@ -167,14 +154,14 @@ def block_diag(num_blocks, block_size):
 
 
 def loss(unmixed_tokens):
+    # the loss is MSE(KTK - I) where K are the D, BL tokens and I is a block diagonal with ones for each batch
+    # we first compute the term for the block diagonal and then compute the rest
     B, L, D = unmixed_tokens.shape
-    unmixed_tokens = unmixed_tokens.view(B * L, D)
-    unmixed_tokens = unmixed_tokens / torch.norm(
-        unmixed_tokens, dim=1, keepdim=True
-    )  # normalize (BL, D)
-    cosine_similarity = torch.matmul(unmixed_tokens, unmixed_tokens.T)  # (BL, BL)
-    mask = block_diag(B, L).to(unmixed_tokens.device)  # (BL, BL)
-    return torch.mean((cosine_similarity - mask) ** 2)
+    batched_cosine_similarity = torch.bmm(unmixed_tokens, unmixed_tokens.transpose(1, 2))
+    loss = torch.sum((batched_cosine_similarity - 1)**2) - torch.sum(batched_cosine_similarity**2) 
+    unmixed_tokens = unmixed_tokens.view(-1, D)
+    loss += torch.sum(torch.matmul(unmixed_tokens, unmixed_tokens.T)**2)  # (BL, BL)
+    return loss / (B * L) ** 2
 
 
 def validate(
@@ -210,37 +197,30 @@ def validate(
         img_batch = (img_batch.to(device) / 255 - 0.5).permute(0, 3, 1, 2)
 
         rgb_tokens = image_to_patches(img_batch, patch_size=patch_size)
-        tokens = model.prepare_tokens_with_masks(img_batch, masks=None)
-        tokens, indices = mix_tokens(tokens, seed=seed + i)  # mixed
-        # compute the embeddings
-        tokens = model.forward_tokens(tokens)["x_norm_patchtokens"]  # embedded
-        # use the embeddings to reconstruct the images
-        _, rasterindices = raster_reconstruction(
-            tokens
-        )  # gives the indices given by raster similarity
-        # now compute the loss
-        unmixed_tokens = unmix_tokens(tokens, indices)
+        mixed_rgb_tokens, indices = mix_tokens(rgb_tokens)  # these indices work for the patch tokens only, indices is (B, L)
+        mixed_img_batch = patches_to_image(mixed_rgb_tokens, patch_size, img_batch.shape[2], img_batch.shape[3])  # (B, 3, H, W)
+        mixed_tokens = model.forward_features(mixed_img_batch)["x_norm_patchtokens"]  # (B, L, D) 
+        unmixed_tokens = unmix_tokens(mixed_tokens, indices)
         losses.append(loss(unmixed_tokens).item())
-        if writer:
-            writer.add_histogram(
-                tag="val/loss", values=np.array(losses), global_step=global_step
-            )
+
+        _, rasterindices = raster_reconstruction(
+           mixed_tokens 
+        )  # gives the indices given by raster similarity
+
         print(f"Mean loss at batch {i+1}/{n_batches}:", np.mean(losses), end="\r")
+
+
 
         if i < n_show:
             # for visualization, save the mixed images
-            mixed_rgb, _ = mix_tokens(rgb_tokens, indices)
-            mixed_imgs = patches_to_image(
-                mixed_rgb, patch_size, image_size, image_size
-            )  # (B, C, H, W)
-            mixed_imgs = torch.concatenate(list(mixed_imgs), dim=-1)
+            mixed_imgs = torch.concatenate(list(mixed_img_batch), dim=-1)
             Image.fromarray(
                 (((mixed_imgs + 0.5) * 255).permute(1, 2, 0).cpu().numpy()).astype(
                     np.uint8
                 )
             ).save(Path(img_logdir) / f"{i}_mixed_step_{global_step}.png")
             # for visualization, save the reconstructed images
-            unmixed_rgb = unmix_tokens(mixed_rgb, rasterindices)
+            unmixed_rgb = unmix_tokens(mixed_rgb_tokens, rasterindices)
             reconstructed_imgs = patches_to_image(
                 unmixed_rgb, patch_size, image_size, image_size
             )
@@ -258,11 +238,15 @@ def validate(
             ).reshape(B, L, 3)
             pca_features = pct_norm(pca_features).reshape(B, int(L ** (1 / 2)), int(L ** (1 / 2)), 3)
             pca_features = np.concatenate(list(pca_features), axis=1)
-            raw_imgs = torch.concatenate(list(((img_batch+0.5)*255).permute(0, 2, 3, 1)), dim=2)
+            raw_imgs = torch.concatenate(list(((img_batch+0.5)*255).permute(0, 2, 3, 1)), dim=1)
             Image.fromarray((pca_features*255).astype(np.uint8)).save(img_logdir / f"{i}_pca_step_{global_step}.png")
             Image.fromarray(raw_imgs.cpu().numpy().astype(np.uint8)).save(img_logdir / f"{i}_raw_step_{global_step}.png")
 
+    # now compute the loss
     if writer:
+        writer.add_histogram(
+            tag="val/loss", values=np.array(losses), global_step=global_step
+        )
         writer.add_scalar("val/mean_loss", np.mean(losses), global_step)
         # save network
         torch.save(model.state_dict, Path(writer.get_logdir()) / f"last_validated_model.pth")
@@ -282,6 +266,9 @@ class RGBModel(torch.nn.Module):
 
     def forward_tokens(self, tokens):
         return {"x_norm_patchtokens": tokens}
+
+    def forward_features(self, x):
+        return self.forward_tokens(self.prepare_tokens_with_masks(x))
 
 
 class FrozenDinoLinear(torch.nn.Module):
@@ -315,8 +302,8 @@ class FrozenDinoLinear(torch.nn.Module):
             )
         }
 
-    def forward(self, x):
-        raise NotImplementedError("This model is not meant to be used for forward pass")
+    def forward_features(self, x):
+        return self.forward_tokens(self.prepare_tokens_with_masks(x))
 
 
 def init_model_and_loss(patch_size, model_name="vits"):
@@ -332,6 +319,7 @@ def init_model_and_loss(patch_size, model_name="vits"):
             interpolate_offset=0.0,
         )
         if "dinov2regs" in model_name:
+            assert patch_size == 14, "Dinov2regs only works with patch size 14"
             model = FrozenDinoLinear(
                 model,
                 dino_weights=True,
@@ -362,6 +350,14 @@ def init_model_and_loss(patch_size, model_name="vits"):
 def dummy_train_step(*args, **kwargs):
     return {"total_loss": torch.tensor([0])}
 
+def visualize_image_batch(img_batch, n_images, tag):
+    B, C, H, W = img_batch.shape
+    assert img_batch.min() > -0.51 and img_batch.max() < 0.51
+    images = ((img_batch.permute(0, 2, 3, 1).cpu().numpy() + 0.5) * 255).astype(np.uint8)
+    for b in range(min(B, n_images)):
+        Image.fromarray(images[b]).save(f"tmp/{tag}_{b}.png")
+    
+
 
 def train_step(
     img_batch,
@@ -370,15 +366,19 @@ def train_step(
     optimizer,
     scheduler,
     effective_batch_size,
+    patch_size,
 ):
     assert (
         -0.51 <= img_batch.min() and img_batch.max() <= 0.51
     ), f"Images should be normalized to [-0.5, 0.5] but are in [{img_batch.min()}, {img_batch.max()}]"
-    # get the tokens, mix them, forward them, unmix them, compute loss
-    tokens = model.prepare_tokens_with_masks(img_batch, masks=None)
-    tokens, indices = mix_tokens(tokens, effective_batch_size=effective_batch_size)
-    tokens = model.forward_tokens(tokens)["x_norm_patchtokens"]
-    unmixed_tokens = unmix_tokens(tokens, indices)
+    assert img_batch.shape[1] == 3, f"Images should have 3 channels but have shape {img_batch.shape}"
+    # img_batch is (B, 3, H, W)
+    # get the images, mix them, forward them, unmix the tokens, compute loss
+    rgb_tokens = image_to_patches(img_batch, patch_size=patch_size)
+    mixed_rgb_tokens, indices = mix_tokens(rgb_tokens, effective_batch_size=effective_batch_size)  # these indices work for the patch tokens only, indices is (B, L)
+    mixed_img_batch = patches_to_image(mixed_rgb_tokens, patch_size, img_batch.shape[2], img_batch.shape[3])  # (B, 3, H, W)
+    mixed_tokens = model.forward_features(mixed_img_batch)["x_norm_patchtokens"]  # (B, L, D) 
+    unmixed_tokens = unmix_tokens(mixed_tokens, indices)
     total_loss = loss_fn(unmixed_tokens)
     # optimizer step
     optimizer.zero_grad(set_to_none=True)
@@ -413,12 +413,13 @@ def main(
 
     model_loss_init_fn = partial(
         init_model_and_loss, patch_size=patch_size, model_name=model_name
+        # note that we don't init the model with the given image size, which conditions the size of the positional embedding
     )
     if evaluate:
         train_step_fn = dummy_train_step
         steps = 1
     else:
-        train_step_fn = partial(train_step, effective_batch_size=effective_batch_size)
+        train_step_fn = partial(train_step, effective_batch_size=effective_batch_size, patch_size=patch_size)
     validate_fn = partial(
         validate,
         n_batches=n_val_batches,
@@ -530,10 +531,10 @@ next:
 - [DONE] Train a vitS network from scratch. <- the loss is okish, not much better than dino+linear
 - [DONE] Train a vitL network from scratch. <- didn't work, loss jumped up, need sing
 - [DONE] Use SING optimizer to see if we get rid of the jumps in the loss
-- Visualize PCA
+- [DONE] Visualize PCA
+- Make patch size flexible
 - Visualize retrieval 
 - Retrain a vitL network from scratch.
-- Make patch size flexible
 - Train a vitL network with patches of 7 and bigger batch size
 
 """

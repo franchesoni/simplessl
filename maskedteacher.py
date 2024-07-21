@@ -220,7 +220,6 @@ def main(
         path_to_imagenet,
         steps,
         val_every,
-        patch_size,
         lr,
         beta,
         weight_decay,

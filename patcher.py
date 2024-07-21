@@ -437,7 +437,6 @@ def main(
         path_to_imagenet=imagenet_path,
         steps=steps,
         val_every=val_every,
-        patch_size=patch_size,
         lr=lr,
         beta=beta,
         weight_decay=weight_decay,

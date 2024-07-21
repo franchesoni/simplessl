@@ -49,7 +49,6 @@ def train(
     path_to_imagenet="/export/home/data/imagenet",  # the expected data structure is IMAGENET_PATH/image_name.JPEG where image_name is the name of the image in the train set. We use no val or test set.
     steps=10000,
     val_every=1000,
-    patch_size=14,
     lr=0.01,
     beta=0.9,
     weight_decay=0.0001,

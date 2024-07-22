@@ -409,6 +409,7 @@ def main(
     seed=0,
     device="cuda" if torch.cuda.is_available() else "cpu",
     dev=False,
+    sing=False,
     tag="",
 ):
 
@@ -447,6 +448,7 @@ def main(
         seed=seed,
         dev=dev,
         tag=tag,
+        sing=sing,
     )
 
     # img_batch = next(iter(dl))  # img_batch is (B, H, W, 3)
@@ -566,3 +568,6 @@ if __name__ == "__main__":
 
 # the following vitl had a jump in the loss and never recovered
 #  python patcher.py --n_val_batches=256 --tag="vitl" --steps=20001 --val_every=2000 --batch_size=32 --num_workers=64 --model_name=vitl --device="cuda:1"
+
+
+# python patcher.py --imagenet_path="/HomeToo/data/stage/image_datasets/train_blurred" --model_name='vits' --batch_size=96 --num_workers=48 --n_val_batches=100 --steps=40000 --val_every=2000 --tag="vits"

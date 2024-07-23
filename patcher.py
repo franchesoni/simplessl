@@ -338,8 +338,8 @@ def init_model_and_loss(patch_size, model_name="vits"):
             num_register_tokens=4,
             interpolate_antialias=True,
             interpolate_offset=0.0,
-            drop_path_rate=0.2,
-            drop_path_uniform=True,
+            # drop_path_rate=0.2,
+            # drop_path_uniform=True,
         )
     else:
         raise NotImplementedError
